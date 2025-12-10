@@ -1,0 +1,11 @@
+JUCE Framework - AGPL-3.0 License
+
+JUCE is used under the AGPL-3.0 license option.
+
+JUCE is copyright (c) Raw Material Software Limited.
+
+Full license text: https://www.gnu.org/licenses/agpl-3.0.txt
+JUCE licensing info: https://juce.com/legal/juce-8-licence/
+
+To obtain the full AGPL-3.0 text, run:
+  curl -o JUCE-AGPL-3.0.txt https://www.gnu.org/licenses/agpl-3.0.txt

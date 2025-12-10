@@ -1,0 +1,67 @@
+# Claude Code local settings
+.claude/
+
+# Build directories
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.vcxproj*
+*.sln
+*.dir/
+
+# IDE files
+.vs/
+.vscode/
+*.swp
+*.swo
+*~
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+
+# User media library (not tracked - put personal clips here)
+library/
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+nul
+
+# JUCE generated files (CMake regenerates these during build)
+juce_library_code/
+
+# Third-party downloads (fetched by scripts)
+third_party/ffmpeg/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Package/distribution
+dist/
+package/
+*.zip
+*.tar.gz
