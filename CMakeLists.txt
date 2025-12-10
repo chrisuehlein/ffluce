@@ -122,6 +122,15 @@ set(FFLUCE_SOURCES
     src/utils/RenderImpl.cpp
 )
 
+# App icon (Windows .ico). If missing, fall back to JUCE default.
+set(FFLUCE_ICON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/icon.ico")
+if(EXISTS "${FFLUCE_ICON_FILE}")
+    set(FFLUCE_ICON_BIG_ARG ICON_BIG "${FFLUCE_ICON_FILE}")
+    set(FFLUCE_ICON_SMALL_ARG ICON_SMALL "${FFLUCE_ICON_FILE}")
+else()
+    message(WARNING "FFLUCE icon not found at ${FFLUCE_ICON_FILE}; using JUCE default icon")
+endif()
+
 # -----------------------------------------------------------------------------
 # JUCE Application Target
 # -----------------------------------------------------------------------------
@@ -130,6 +139,8 @@ juce_add_gui_app(FFLUCE
     COMPANY_NAME "FFLUCE"
     BUNDLE_ID "com.ffluce.app"
     VERSION "${PROJECT_VERSION}"
+    ${FFLUCE_ICON_BIG_ARG}
+    ${FFLUCE_ICON_SMALL_ARG}
 )
 
 # Generate JuceHeader.h so legacy includes continue to work
