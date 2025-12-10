@@ -132,6 +132,9 @@ juce_add_gui_app(FFLUCE
     VERSION "${PROJECT_VERSION}"
 )
 
+# Generate JuceHeader.h so legacy includes continue to work
+juce_generate_juce_header(FFLUCE)
+
 target_sources(FFLUCE PRIVATE ${FFLUCE_SOURCES})
 
 target_include_directories(FFLUCE PRIVATE
