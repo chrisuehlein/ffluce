@@ -122,13 +122,25 @@ set(FFLUCE_SOURCES
     src/utils/RenderImpl.cpp
 )
 
-# App icon (Windows .ico). If missing, fall back to JUCE default.
-set(FFLUCE_ICON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/icon.ico")
-if(EXISTS "${FFLUCE_ICON_FILE}")
+# App icon. Prefer .ico when available (Windows), otherwise fall back to PNG.
+set(FFLUCE_ICON_FILE "")
+foreach(candidate
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/icon.ico"
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/icon.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/logo.png"
+)
+    if(EXISTS "${candidate}")
+        set(FFLUCE_ICON_FILE "${candidate}")
+        break()
+    endif()
+endforeach()
+
+if(FFLUCE_ICON_FILE)
+    message(STATUS "Using app icon: ${FFLUCE_ICON_FILE}")
     set(FFLUCE_ICON_BIG_ARG ICON_BIG "${FFLUCE_ICON_FILE}")
     set(FFLUCE_ICON_SMALL_ARG ICON_SMALL "${FFLUCE_ICON_FILE}")
 else()
-    message(WARNING "FFLUCE icon not found at ${FFLUCE_ICON_FILE}; using JUCE default icon")
+    message(WARNING "App icon not found (expected icon.ico/icon.png/logo.png in assets/images); using JUCE default icon")
 endif()
 
 # -----------------------------------------------------------------------------
