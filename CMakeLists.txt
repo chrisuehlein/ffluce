@@ -135,6 +135,11 @@ juce_add_gui_app(FFLUCE
 # Generate JuceHeader.h so legacy includes continue to work
 juce_generate_juce_header(FFLUCE)
 
+# Keep built executables in a predictable bin/<config> folder
+set_target_properties(FFLUCE PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
+)
+
 target_sources(FFLUCE PRIVATE ${FFLUCE_SOURCES})
 
 target_include_directories(FFLUCE PRIVATE
@@ -203,6 +208,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/images")
         target_link_libraries(FFLUCE PRIVATE FFLUCE_BinaryData)
     endif()
 endif()
+
+# Copy demo video assets next to the executable so defaults work out-of-the-box
+add_custom_command(TARGET FFLUCE POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:FFLUCE>/assets/video"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/video"
+            "$<TARGET_FILE_DIR:FFLUCE>/assets/video"
+    COMMENT "Copying demo video assets into the output directory"
+)
 
 # -----------------------------------------------------------------------------
 # Summary

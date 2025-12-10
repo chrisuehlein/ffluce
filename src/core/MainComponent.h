@@ -509,6 +509,10 @@ private:
     // Stream health monitoring
     void parseFFmpegStats(const juce::String& output);
     void updateStreamHealthDisplay();
+
+    // Demo assets
+    void loadDemoClipsIfAvailable();
+    juce::File findDemoAssetsVideoDir() const;
     
     // Render timer overlay - will be a floating window on top of the UI
     std::unique_ptr<RenderTimerOverlay> renderTimerOverlay;

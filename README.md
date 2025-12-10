@@ -77,6 +77,8 @@ The first configure will download JUCE automatically via CMake FetchContent (thi
 ./scripts/build.sh
 ```
 
+The executable is placed in `build/bin/Release/FFLUCE.exe` (or `build/bin/Debug` for debug builds), with the demo clips copied alongside in `assets/video` so a fresh run can render immediately.
+
 ## Project Structure
 
 ```

@@ -362,6 +362,9 @@ MainComponent::MainComponent()
 
     setAudioChannels(0, 2);
     setSize(1200, 800);
+
+    // Pre-load demo clips so a fresh install has something to render immediately
+    loadDemoClipsIfAvailable();
 }
 
 MainComponent::~MainComponent()
@@ -1956,6 +1959,63 @@ void MainComponent::updateStreamingAudioSettings()
 
         streamingFilePlayer->setPlaylist(filePlayer->getPlaylist());
     }
+}
+
+juce::File MainComponent::findDemoAssetsVideoDir() const
+{
+    juce::Array<juce::File> candidates;
+
+    // Prefer assets bundled next to the executable (CMake post-build copy)
+    auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+    candidates.add(exeDir.getChildFile("assets/video"));
+
+    // Fall back to parent directories (common when running from the build tree or IDE)
+    auto parent = exeDir;
+    for (int i = 0; i < 3; ++i)
+    {
+        parent = parent.getParentDirectory();
+        if (parent == juce::File())
+            break;
+        candidates.add(parent.getChildFile("assets/video"));
+    }
+
+    // Finally, try the current working directory
+    candidates.add(juce::File::getCurrentWorkingDirectory().getChildFile("assets/video"));
+
+    for (const auto& dir : candidates)
+    {
+        if (dir.isDirectory())
+            return dir;
+    }
+
+    return {};
+}
+
+void MainComponent::loadDemoClipsIfAvailable()
+{
+    // Keep user projects intact if clips are already present
+    if (videoPanel.getNumIntroClips() > 0 ||
+        videoPanel.getNumLoopClips() > 0 ||
+        videoPanel.getNumOverlayClips() > 0)
+        return;
+
+    auto assetsDir = findDemoAssetsVideoDir();
+    if (!assetsDir.isDirectory())
+        return;
+
+    auto introFile = assetsDir.getChildFile("intro.mp4");
+    auto loopFile = assetsDir.getChildFile("loop.mp4");
+    auto overlayFile = assetsDir.getChildFile("overlay.mov");
+
+    if (introFile.existsAsFile())
+        videoPanel.addIntroClip(introFile, 0.0, 1.0);
+    if (loopFile.existsAsFile())
+        videoPanel.addLoopClip(loopFile, 0.0, 1.0);
+    if (overlayFile.existsAsFile())
+        videoPanel.addOverlayClip(overlayFile, 0.0, 5.0, 10.0);
+
+    if (videoPanel.getNumIntroClips() + videoPanel.getNumLoopClips() + videoPanel.getNumOverlayClips() > 0)
+        addProgressMessage("Loaded demo clips from: " + assetsDir.getFullPathName());
 }
 
 void MainComponent::parseFFmpegStats(const juce::String& output)
