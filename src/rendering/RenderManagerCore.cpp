@@ -320,6 +320,19 @@ bool RenderManagerCore::startRendering(
     this->fadeOutDuration = fadeOutDuration;
     this->statusCallback = statusCallback;
     this->progressCallback = progressCallback;
+
+    // Sanitize clip metadata to avoid bogus offsets/durations from earlier UI state or saved projects
+    auto sanitizeClip = [](RenderTypes::VideoClipInfo& clip) {
+        if (!std::isfinite(clip.startTime) || clip.startTime < 0.0)
+            clip.startTime = 0.0;
+        if (!std::isfinite(clip.duration) || clip.duration <= 0.0)
+            clip.duration = 0.0; // will be clamped later to actual duration
+        if (!std::isfinite(clip.crossfade) || clip.crossfade < 0.0)
+            clip.crossfade = 0.0;
+    };
+    for (auto& c : this->introClips) sanitizeClip(c);
+    for (auto& c : this->loopClips)  sanitizeClip(c);
+
     this->useNvidiaAcceleration = useNvidiaAcceleration;
     this->audioOnly = audioOnly;
     this->tempNvidiaParams = tempNvidiaParams;

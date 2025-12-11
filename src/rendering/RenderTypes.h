@@ -14,10 +14,10 @@ namespace RenderTypes
     struct VideoClipInfo
     {
         juce::File file;
-        double startTime;   // Start time offset within the clip
-        double duration;    // Duration to use from the clip
-        double crossfade;   // Duration of crossfade with next clip
-        bool isIntroClip;   // Whether this is an intro clip (vs loop clip)
+        double startTime { 0.0 };   // Start time offset within the clip
+        double duration { 0.0 };    // Duration to use from the clip
+        double crossfade { 0.0 };   // Duration of crossfade with next clip
+        bool isIntroClip { false }; // Whether this is an intro clip (vs loop clip)
     };
     
     /** Information about an overlay clip to be rendered */

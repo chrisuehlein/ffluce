@@ -310,23 +310,39 @@ bool TimelineAssembler::conformInputClips(const std::vector<RenderTypes::VideoCl
             return false;
         }
 
-        double safeStartTime = (clip.startTime > 0.001 && clip.startTime < 1e10) ? clip.startTime : 0.0;
-        if (logCallback && clip.startTime != safeStartTime)
-            logCallback("WARNING: Invalid startTime " + juce::String(clip.startTime) + " corrected to " + juce::String(safeStartTime));
+        const double sourceDuration = ffmpegExecutor->getFileDuration(inputFile);
 
-        double sourceDuration = ffmpegExecutor->getFileDuration(inputFile);
-        double effectiveSourceDuration = sourceDuration - safeStartTime;
+        // Clamp start time to a sensible range within the clip
+        double safeStartTime = 0.0;
+        if (std::isfinite(clip.startTime) && clip.startTime > 0.0 && clip.startTime < sourceDuration - 0.001)
+            safeStartTime = clip.startTime;
+        else if (logCallback && clip.startTime != 0.0)
+            logCallback("WARNING: Invalid startTime " + juce::String(clip.startTime) + " corrected to 0.0");
+
+        // Clamp requested duration to the available range
+        double requestedDuration = clip.duration;
+        if (!std::isfinite(requestedDuration) || requestedDuration <= 0.0 || requestedDuration > sourceDuration)
+            requestedDuration = sourceDuration;
+
+        const double effectiveSourceDuration = juce::jmax(0.0, sourceDuration - safeStartTime);
+
+        if (requestedDuration > effectiveSourceDuration) {
+            if (logCallback)
+                logCallback("WARNING: Requested duration " + juce::String(clip.duration) + " exceeds available " +
+                            juce::String(effectiveSourceDuration) + ", clamping.");
+            requestedDuration = effectiveSourceDuration;
+        }
 
         if (logCallback)
         {
             logCallback("  - Source duration: " + juce::String(sourceDuration) + "s");
             logCallback("  - Effective source duration (after start time): " + juce::String(effectiveSourceDuration) + "s");
-            logCallback("  - Target duration: " + juce::String(clip.duration) + "s");
+            logCallback("  - Target duration: " + juce::String(requestedDuration) + "s");
         }
 
         juce::String primaryParams = ensureCodecParam(useNvidiaAcceleration ? tempNvidiaParams : tempCpuParams,
                                                       useNvidiaAcceleration);
-        juce::String command = buildCommand(ffmpegExecutor, inputFile, outputFile, clip.duration, safeStartTime, effectiveSourceDuration, primaryParams);
+        juce::String command = buildCommand(ffmpegExecutor, inputFile, outputFile, requestedDuration, safeStartTime, effectiveSourceDuration, primaryParams);
 
         if (!ffmpegExecutor->executeCommand(command, 0.0, 1.0))
         {
@@ -334,7 +350,7 @@ bool TimelineAssembler::conformInputClips(const std::vector<RenderTypes::VideoCl
             {
                 if (logCallback) logCallback("WARNING: NVENC conform failed for " + label + ", retrying with CPU preset");
                 juce::String fallbackParams = ensureCodecParam(tempCpuParams, false);
-                juce::String fallbackCommand = buildCommand(ffmpegExecutor, inputFile, outputFile, clip.duration, safeStartTime, effectiveSourceDuration, fallbackParams);
+                juce::String fallbackCommand = buildCommand(ffmpegExecutor, inputFile, outputFile, requestedDuration, safeStartTime, effectiveSourceDuration, fallbackParams);
                 if (!ffmpegExecutor->executeCommand(fallbackCommand, 0.0, 1.0))
                 {
                     if (logCallback) logCallback("ERROR: CPU fallback also failed for " + label);
