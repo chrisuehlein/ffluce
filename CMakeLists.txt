@@ -122,18 +122,22 @@ set(FFLUCE_SOURCES
     src/utils/RenderImpl.cpp
 )
 
-# App icon. Prefer .ico when available (Windows), otherwise fall back to PNG.
-set(FFLUCE_ICON_FILE "")
-foreach(candidate
-    "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/icon.ico"
-    "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/icon.png"
-    "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/logo.png"
-)
-    if(EXISTS "${candidate}")
-        set(FFLUCE_ICON_FILE "${candidate}")
-        break()
-    endif()
-endforeach()
+# App icon: allow override via FFLUCE_ICON_PATH, otherwise probe common locations.
+if(DEFINED FFLUCE_ICON_PATH AND EXISTS "${FFLUCE_ICON_PATH}")
+    set(FFLUCE_ICON_FILE "${FFLUCE_ICON_PATH}")
+else()
+    set(FFLUCE_ICON_FILE "")
+    foreach(candidate
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/icon.png"
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/logo.png"
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/icon.ico"
+    )
+        if(EXISTS "${candidate}")
+            set(FFLUCE_ICON_FILE "${candidate}")
+            break()
+        endif()
+    endforeach()
+endif()
 
 if(FFLUCE_ICON_FILE)
     message(STATUS "Using app icon: ${FFLUCE_ICON_FILE}")

@@ -44,6 +44,47 @@ if (-not (Test-Path $BuildDir)) {
     New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
 }
 
+# Resolve app icon: prefer PNG, fall back to ICO (convert to PNG for JUCE).
+$iconCandidatesPng = @(
+    "$ProjectRoot\assets\images\icon.png",
+    "$ProjectRoot\assets\images\logo.png"
+)
+$iconCandidatesIco = @(
+    "$ProjectRoot\assets\images\icon.ico"
+)
+
+$IconPath = $null
+foreach ($c in $iconCandidatesPng) {
+    if (Test-Path $c) { $IconPath = (Get-Item $c).FullName; break }
+}
+
+# If only .ico exists, convert it to a PNG for the build (JUCE's generator expects PNG input)
+if (-not $IconPath) {
+    foreach ($ico in $iconCandidatesIco) {
+        if (Test-Path $ico) {
+            try {
+                Add-Type -AssemblyName System.Drawing
+                $icoObj = New-Object System.Drawing.Icon($ico)
+                $bmp = $icoObj.ToBitmap()
+                $generatedPng = Join-Path $BuildDir "icon_from_ico.png"
+                $bmp.Save($generatedPng, [System.Drawing.Imaging.ImageFormat]::Png)
+                $bmp.Dispose(); $icoObj.Dispose()
+                $IconPath = $generatedPng
+                Write-Host "Converted icon.ico to PNG for build: $IconPath"
+            } catch {
+                Write-Warning "Failed to convert icon.ico to PNG: $_"
+            }
+            break
+        }
+    }
+}
+
+if ($IconPath) {
+    Write-Host "Using app icon: $IconPath"
+} else {
+    Write-Warning "No app icon found (looking for icon.png/logo.png/icon.ico in assets/images)"
+}
+
 # Configure
 Write-Host "Running CMake configure..." -ForegroundColor Green
 $cmakeArgs = @(
@@ -55,6 +96,9 @@ $cmakeArgs = @(
 
 if ($FfmpegRoot) {
     $cmakeArgs += "-DFFLUCE_FFMPEG_ROOT=$FfmpegRoot"
+}
+if ($IconPath) {
+    $cmakeArgs += "-DFFLUCE_ICON_PATH=$IconPath"
 }
 
 & cmake @cmakeArgs
