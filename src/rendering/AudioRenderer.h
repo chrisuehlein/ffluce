@@ -4,6 +4,7 @@
 #include "../audio/FilePlayerAudioSource.h"
 #include "../audio/NoiseAudioSource.h"
 #include "RenderTypes.h"
+#include <vector>
 
 /**
  * Handles the rendering of audio from binaural, file, and noise sources.
@@ -18,11 +19,13 @@ public:
     
     /**
      * Creates a new AudioRenderer.
-     * @param binauralSource The binaural audio source to render from
-     * @param filePlayer The file audio source to render from (optional)
-     * @param noiseSource The noise audio source to render from (optional)
+     * @param binauralSources Binaural audio sources to render from
+     * @param filePlayers File audio sources to render from
+     * @param noiseSources Noise audio sources to render from
      */
-    AudioRenderer(BinauralAudioSource* binauralSource, FilePlayerAudioSource* filePlayer = nullptr, NoiseAudioSource* noiseSource = nullptr);
+    AudioRenderer(const std::vector<BinauralAudioSource*>& binauralSources,
+                  const std::vector<FilePlayerAudioSource*>& filePlayers,
+                  const std::vector<NoiseAudioSource*>& noiseSources);
     ~AudioRenderer();
     
     /**
@@ -30,6 +33,12 @@ public:
      * @param logCallback Function called with log messages
      */
     void setLogCallback(std::function<void(const juce::String&)> logCallback);
+
+    /**
+     * Sets a cancellation flag that will be checked during rendering.
+     * @param cancelFlag Pointer to atomic bool that signals cancellation
+     */
+    void setCancellationFlag(std::atomic<bool>* cancelFlag);
     
     /**
      * Renders audio to a file.
@@ -93,12 +102,15 @@ private:
                   bool fadeIn);
     
     // Audio sources
-    BinauralAudioSource* binauralSource;
-    FilePlayerAudioSource* filePlayer;
-    NoiseAudioSource* noiseSource;
-    
+    std::vector<BinauralAudioSource*> binauralSources;
+    std::vector<FilePlayerAudioSource*> filePlayers;
+    std::vector<NoiseAudioSource*> noiseSources;
+
     // Log callback
     std::function<void(const juce::String&)> logCallback;
+
+    // Cancellation flag (external)
+    std::atomic<bool>* cancelFlag = nullptr;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioRenderer)
 };

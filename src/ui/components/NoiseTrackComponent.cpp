@@ -46,7 +46,8 @@ void NoiseTrackComponent::resized()
     
     // Use the controls area that the base class reserved
     auto r = getLocalBounds().reduced(4);
-    r.removeFromTop(25); // Skip title area
+    if (isTrackTitleVisible())
+        r.removeFromTop(25); // Skip title area
     
     // This is the 50px controls area reserved by the base class
     auto controlsArea = r.removeFromTop(50);

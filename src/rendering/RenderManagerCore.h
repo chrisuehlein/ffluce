@@ -9,6 +9,7 @@
 #include "TimelineAssembler.h"
 #include "OverlayProcessor.h"
 #include "AudioRenderer.h"
+#include <vector>
 
 /**
  * Core render manager that coordinates the entire rendering pipeline.
@@ -25,11 +26,13 @@ public:
     
     /**
      * Creates a new RenderManagerCore.
-     * @param audioSource The binaural audio source to render from
-     * @param filePlayer The file audio source to render from (optional)
-     * @param noiseSource The noise audio source to render from (optional)
+     * @param binauralSources Binaural audio sources to render from
+     * @param filePlayers File audio sources to render from
+     * @param noiseSources Noise audio sources to render from
      */
-    RenderManagerCore(BinauralAudioSource* binauralSource, FilePlayerAudioSource* filePlayer = nullptr, NoiseAudioSource* noiseSource = nullptr);
+    RenderManagerCore(const std::vector<BinauralAudioSource*>& binauralSources,
+                      const std::vector<FilePlayerAudioSource*>& filePlayers,
+                      const std::vector<NoiseAudioSource*>& noiseSources);
     
     ~RenderManagerCore() override;
     
@@ -99,9 +102,9 @@ private:
     std::unique_ptr<AudioRenderer> audioRenderer;
     
     // Audio sources
-    BinauralAudioSource* binauralSource;
-    FilePlayerAudioSource* filePlayer;
-    NoiseAudioSource* noiseSource;
+    std::vector<BinauralAudioSource*> binauralSources;
+    std::vector<FilePlayerAudioSource*> filePlayers;
+    std::vector<NoiseAudioSource*> noiseSources;
     
     // Render parameters
     juce::File outputFile;

@@ -1,16 +1,15 @@
 #include "AudioRenderer.h"
 
 AudioRenderer::AudioRenderer()
-    : binauralSource(nullptr),
-      filePlayer(nullptr),
-      noiseSource(nullptr)
 {
 }
 
-AudioRenderer::AudioRenderer(BinauralAudioSource* binauralSource, FilePlayerAudioSource* filePlayer, NoiseAudioSource* noiseSource)
-    : binauralSource(binauralSource),
-      filePlayer(filePlayer),
-      noiseSource(noiseSource)
+AudioRenderer::AudioRenderer(const std::vector<BinauralAudioSource*>& binauralSources,
+                             const std::vector<FilePlayerAudioSource*>& filePlayers,
+                             const std::vector<NoiseAudioSource*>& noiseSources)
+    : binauralSources(binauralSources),
+      filePlayers(filePlayers),
+      noiseSources(noiseSources)
 {
 }
 
@@ -23,250 +22,271 @@ void AudioRenderer::setLogCallback(std::function<void(const juce::String&)> call
     logCallback = callback;
 }
 
+void AudioRenderer::setCancellationFlag(std::atomic<bool>* flag)
+{
+    cancelFlag = flag;
+}
+
 bool AudioRenderer::renderAudio(const juce::File& outputFile,
-                             double durationSeconds,
-                             double fadeInDuration,
-                             double fadeOutDuration)
+                                double durationSeconds,
+                                double fadeInDuration,
+                                double fadeOutDuration)
 {
     if (logCallback)
         logCallback("Rendering audio track for " + juce::String(durationSeconds) + " seconds");
-    
-    if (!binauralSource && !filePlayer && !noiseSource)
+
+    if (logCallback)
+    {
+        logCallback("Audio source inventory:");
+        logCallback("  Binaural tracks: " + juce::String((int)binauralSources.size()));
+        logCallback("  File tracks: " + juce::String((int)filePlayers.size()));
+        logCallback("  Noise tracks: " + juce::String((int)noiseSources.size()));
+    }
+
+    std::vector<std::unique_ptr<BinauralAudioSource>> renderBinauralSources;
+    std::vector<std::unique_ptr<FilePlayerAudioSource>> renderFilePlayers;
+    std::vector<std::unique_ptr<NoiseAudioSource>> renderNoiseSources;
+
+    renderBinauralSources.reserve(binauralSources.size());
+    renderFilePlayers.reserve(filePlayers.size());
+    renderNoiseSources.reserve(noiseSources.size());
+
+    for (auto* source : binauralSources)
+    {
+        if (source == nullptr)
+            continue;
+
+        auto copy = std::make_unique<BinauralAudioSource>();
+        copy->setLeftFrequency(source->getLeftFrequency());
+        copy->setRightFrequency(source->getRightFrequency());
+        copy->setGain(source->getGain());
+        renderBinauralSources.push_back(std::move(copy));
+    }
+
+    int fileTrackIndex = 0;
+    for (auto* source : filePlayers)
+    {
+        ++fileTrackIndex;
+
+        if (source == nullptr)
+        {
+            if (logCallback)
+                logCallback("  File track " + juce::String(fileTrackIndex) + ": skipped (null source)");
+            continue;
+        }
+
+        const float gain = source->getGain();
+        if (gain <= 0.0001f)
+        {
+            if (logCallback)
+                logCallback("  File track " + juce::String(fileTrackIndex) + ": skipped (muted/zero gain)");
+            continue;
+        }
+
+        auto copy = std::make_unique<FilePlayerAudioSource>();
+        auto playlist = source->getPlaylist();
+        if (!playlist.empty())
+        {
+            const bool singleAudioItem = (playlist.size() == 1 &&
+                                          playlist.front().type == FilePlayerAudioSource::PlaylistItem::ItemType::AudioFile);
+            const bool intendedInfiniteLoop = (singleAudioItem &&
+                                               playlist.front().targetDurationSeconds <= 0.0 &&
+                                               playlist.front().repetitions <= 0);
+            if (intendedInfiniteLoop)
+                playlist.front().repetitions = -1;
+
+            copy->setPlaylist(playlist);
+            copy->setGain(gain);
+            copy->setPosition(0.0);
+            copy->start();
+            renderFilePlayers.push_back(std::move(copy));
+            if (logCallback)
+            {
+                const auto& first = playlist.front();
+                const juce::String firstType = first.type == FilePlayerAudioSource::PlaylistItem::ItemType::AudioFile ? "audio" : "silence";
+                logCallback("  File track " + juce::String(fileTrackIndex) + ": playlist mode (" +
+                            juce::String((int)playlist.size()) + " items, gain=" + juce::String(gain, 4) +
+                            ", firstFile=" + first.file.getFileName() +
+                            ", firstType=" + firstType +
+                            ", firstRepeats=" + juce::String(first.repetitions) +
+                            ", firstTargetSec=" + juce::String(first.targetDurationSeconds, 3) +
+                            ", firstCrossfadeSec=" + juce::String(first.crossfadeSeconds, 3) +
+                            ", renderInfiniteLoop=" + juce::String(intendedInfiniteLoop ? "yes" : "no") + ")");
+            }
+            continue;
+        }
+
+        if (source->isLoaded())
+        {
+            const auto file = source->getLoadedFile();
+            if (file.existsAsFile())
+            {
+                copy->loadFile(file);
+                copy->setGain(gain);
+                copy->setPosition(0.0);
+                copy->start();
+                renderFilePlayers.push_back(std::move(copy));
+                if (logCallback)
+                    logCallback("  File track " + juce::String(fileTrackIndex) + ": single file mode (" +
+                                file.getFileName() + ", gain=" + juce::String(gain, 4) + ")");
+            }
+            else if (logCallback)
+            {
+                logCallback("  File track " + juce::String(fileTrackIndex) + ": skipped (missing file " +
+                            file.getFullPathName() + ")");
+            }
+        }
+        else if (logCallback)
+        {
+            logCallback("  File track " + juce::String(fileTrackIndex) + ": skipped (empty playlist)");
+        }
+    }
+
+    for (auto* source : noiseSources)
+    {
+        if (source == nullptr)
+            continue;
+
+        auto copy = std::make_unique<NoiseAudioSource>();
+        copy->setNoiseType(source->getNoiseType());
+        copy->setGain(source->getGain());
+        copy->setMuted(source->isMuted());
+        renderNoiseSources.push_back(std::move(copy));
+    }
+
+    if (renderBinauralSources.empty() && renderFilePlayers.empty() && renderNoiseSources.empty())
     {
         if (logCallback)
             logCallback("ERROR: No audio source available");
         return false;
     }
 
-    // Create separate copies of the audio sources for rendering
-    std::unique_ptr<FilePlayerAudioSource> renderFilePlayer;
-    std::unique_ptr<BinauralAudioSource> renderBinauralSource;
-    std::unique_ptr<NoiseAudioSource> renderNoiseSource;
-    
-    if (filePlayer != nullptr)
-    {
-        const auto playlist = filePlayer->getPlaylist();
-        if (!playlist.empty())
-        {
-            renderFilePlayer = std::make_unique<FilePlayerAudioSource>();
-            renderFilePlayer->setPlaylist(playlist);
-            renderFilePlayer->setGain(filePlayer->getGain());
-            renderFilePlayer->start();
-        }
-        else if (filePlayer->isLoaded())
-        {
-            renderFilePlayer = std::make_unique<FilePlayerAudioSource>();
-            juce::File originalFile = filePlayer->getLoadedFile();
-            if (originalFile.existsAsFile())
-            {
-                renderFilePlayer->loadFile(originalFile);
-                renderFilePlayer->setGain(filePlayer->getGain());
-                renderFilePlayer->start();
-            }
-        }
-    }
-    
-    if (binauralSource != nullptr)
-    {
-        renderBinauralSource = std::make_unique<BinauralAudioSource>();
-        renderBinauralSource->setLeftFrequency(binauralSource->getLeftFrequency());
-        renderBinauralSource->setRightFrequency(binauralSource->getRightFrequency());
-        renderBinauralSource->setGain(binauralSource->getGain());
-    }
-
-    if (noiseSource != nullptr)
-    {
-        renderNoiseSource = std::make_unique<NoiseAudioSource>();
-        renderNoiseSource->setNoiseType(noiseSource->getNoiseType());
-        renderNoiseSource->setGain(noiseSource->getGain());
-        renderNoiseSource->setMuted(noiseSource->isMuted());
-    }
-
-    FilePlayerAudioSource* sourcePlayer = renderFilePlayer ? renderFilePlayer.get() : filePlayer;
-    BinauralAudioSource* sourceBinaural = renderBinauralSource ? renderBinauralSource.get() : binauralSource;
-    NoiseAudioSource* sourceNoise = renderNoiseSource ? renderNoiseSource.get() : noiseSource;
-
     const int sampleRate = 44100;
     const int numChannels = 2;
     const juce::int64 totalSamples = static_cast<juce::int64>(durationSeconds * sampleRate);
-
-    // Use chunked rendering for large files to avoid memory allocation failures
     const int chunkSize = sampleRate * 10;
     const juce::int64 numChunks = (totalSamples + chunkSize - 1) / chunkSize;
-    
-    // Create WAV file writer first
+
     juce::WavAudioFormat wavFormat;
     std::unique_ptr<juce::AudioFormatWriter> writer;
-    
     writer.reset(wavFormat.createWriterFor(new juce::FileOutputStream(outputFile),
                                            sampleRate,
                                            numChannels,
-                                           24,   // 24-bit depth for high-quality audio
-                                           {},   // No metadata
-                                           0));  // No compression
-    
+                                           24,
+                                           {},
+                                           0));
+
     if (writer == nullptr)
     {
-        try {
-            if (logCallback)
-                logCallback("ERROR: Failed to create audio file writer");
-        }
-        catch (const std::exception& e) {
-            // Continue even if logging fails
-        }
+        if (logCallback)
+            logCallback("ERROR: Failed to create audio file writer");
         return false;
     }
-    
-    // Initialize audio sources once
-    if (sourceBinaural)
-        sourceBinaural->prepareToPlay(chunkSize, sampleRate);
-    if (sourcePlayer)
-        sourcePlayer->prepareToPlay(chunkSize, sampleRate);
-    if (sourceNoise && !sourceNoise->isMuted())
-        sourceNoise->prepareToPlay(chunkSize, sampleRate);
-    
-    // Process audio in chunks
+
+    for (auto& source : renderBinauralSources)
+        source->prepareToPlay(chunkSize, sampleRate);
+    for (auto& source : renderFilePlayers)
+        source->prepareToPlay(chunkSize, sampleRate);
+    for (auto& source : renderNoiseSources)
+        source->prepareToPlay(chunkSize, sampleRate);
+
+    juce::AudioBuffer<float> tempBuffer;
+
     for (juce::int64 chunkIndex = 0; chunkIndex < numChunks; ++chunkIndex)
     {
-        const juce::int64 startSample = chunkIndex * chunkSize;
-        const int currentChunkSize = static_cast<int>(juce::jmin(static_cast<juce::int64>(chunkSize), 
-                                                                  totalSamples - startSample));
-        
-        if (logCallback && chunkIndex % 100 == 0) {
-            logCallback("  Processing chunk " + juce::String(chunkIndex + 1) + " of " + juce::String(numChunks));
+        if (cancelFlag && cancelFlag->load())
+        {
+            if (logCallback)
+                logCallback("Audio rendering cancelled");
+            return false;
         }
-        
-        // Create buffer for this chunk
+
+        const juce::int64 startSample = chunkIndex * chunkSize;
+        const int currentChunkSize = static_cast<int>(juce::jmin(static_cast<juce::int64>(chunkSize),
+                                                                  totalSamples - startSample));
+        if (currentChunkSize <= 0)
+            break;
+
+        if (logCallback && chunkIndex % 100 == 0)
+            logCallback("  Processing chunk " + juce::String(chunkIndex + 1) + " of " + juce::String(numChunks));
+
         juce::AudioSampleBuffer chunkBuffer(numChannels, currentChunkSize);
         chunkBuffer.clear();
-        
-        // Fill buffer with audio from sources
-        juce::AudioSourceChannelInfo info(&chunkBuffer, 0, currentChunkSize);
-    
-        // Render binaural audio if available
-        if (sourceBinaural)
+
+        auto mixSource = [&](juce::AudioSource* source)
         {
-            try {
-                // Get the binaural audio - use our render copy
-                sourceBinaural->getNextAudioBlock(info);
-            } catch (const std::exception& e) {
-                if (logCallback) {
-                    logCallback("  ERROR getting audio from binaural source: " + juce::String(e.what()));
-                }
-            }
-        }
-    
-        // Mix in file player audio if available
-        if (sourcePlayer)
-        {
-            // Create temporary buffer for file audio
-            juce::AudioSampleBuffer fileBuffer(numChannels, currentChunkSize);
-            fileBuffer.clear();
-            
-            juce::AudioSourceChannelInfo fileInfo(&fileBuffer, 0, currentChunkSize);
-            
-            // Get audio data from file player
-            try {
-                // Get the file audio - use our render copy that's already in "playing" mode
-                sourcePlayer->getNextAudioBlock(fileInfo);
-            } catch (const std::exception& e) {
-                if (logCallback) {
-                    logCallback("  ERROR getting audio from file player: " + juce::String(e.what()));
-                }
-            }
-            
-            // Mix into main buffer
+            if (source == nullptr)
+                return;
+
+            tempBuffer.setSize(numChannels, currentChunkSize, false, false, true);
+            tempBuffer.clear();
+
+            juce::AudioSourceChannelInfo info(&tempBuffer, 0, currentChunkSize);
+            source->getNextAudioBlock(info);
+
             for (int channel = 0; channel < numChannels; ++channel)
-            {
-                chunkBuffer.addFrom(channel, 0, fileBuffer, channel, 0, currentChunkSize);
-            }
-        }
-    
-        // Mix in noise audio if available and not muted
-        if (sourceNoise && !sourceNoise->isMuted())
+                chunkBuffer.addFrom(channel, 0, tempBuffer, channel, 0, currentChunkSize);
+        };
+
+        for (auto& source : renderBinauralSources)
+            mixSource(source.get());
+        for (auto& source : renderFilePlayers)
+            mixSource(source.get());
+        for (auto& source : renderNoiseSources)
         {
-            // Create temporary buffer for noise audio
-            juce::AudioSampleBuffer noiseBuffer(numChannels, currentChunkSize);
-            noiseBuffer.clear();
-            
-            juce::AudioSourceChannelInfo noiseInfo(&noiseBuffer, 0, currentChunkSize);
-            
-            // Get audio data from noise source
-            try {
-                // Get the noise audio
-                sourceNoise->getNextAudioBlock(noiseInfo);
-            } catch (const std::exception& e) {
-                if (logCallback) {
-                    logCallback("  ERROR getting audio from noise source: " + juce::String(e.what()));
-                }
-            }
-            
-            // Mix into main buffer
-            for (int channel = 0; channel < numChannels; ++channel)
-            {
-                chunkBuffer.addFrom(channel, 0, noiseBuffer, channel, 0, currentChunkSize);
-            }
+            if (!source->isMuted())
+                mixSource(source.get());
         }
-        
-        // Apply fade-in to first chunk if needed
-        if (chunkIndex == 0 && fadeInDuration > 0.0)
+
+        if (fadeInDuration > 0.0)
         {
             const int fadeInSamples = static_cast<int>(fadeInDuration * sampleRate);
-            const int samplesToFade = juce::jmin(fadeInSamples, currentChunkSize);
-            applyFade(chunkBuffer, 0, samplesToFade, true);
-        }
-        else if (fadeInDuration > 0.0)
-        {
-            // Continue fade-in if it extends beyond first chunk
-            const int fadeInSamples = static_cast<int>(fadeInDuration * sampleRate);
-            const juce::int64 fadeEndSample = fadeInSamples;
-            if (startSample < fadeEndSample)
+            if (chunkIndex == 0)
             {
-                const int fadeStartInChunk = 0;
-                const int fadeEndInChunk = static_cast<int>(juce::jmin(fadeEndSample - startSample, 
-                                                                       static_cast<juce::int64>(currentChunkSize)));
-                const int samplesToFade = fadeEndInChunk - fadeStartInChunk;
-                
-                if (samplesToFade > 0)
+                const int samplesToFade = juce::jmin(fadeInSamples, currentChunkSize);
+                applyFade(chunkBuffer, 0, samplesToFade, true);
+            }
+            else
+            {
+                const juce::int64 fadeEndSample = fadeInSamples;
+                if (startSample < fadeEndSample)
                 {
-                    // Calculate fade position relative to overall fade
-                    const float fadeStartPos = static_cast<float>(startSample) / fadeInSamples;
-                    const float fadeEndPos = static_cast<float>(startSample + fadeEndInChunk) / fadeInSamples;
-                    
-                    // Apply partial fade
-                    for (int channel = 0; channel < numChannels; ++channel)
+                    const int fadeStartInChunk = 0;
+                    const int fadeEndInChunk = static_cast<int>(juce::jmin(fadeEndSample - startSample,
+                                                                           static_cast<juce::int64>(currentChunkSize)));
+                    const int samplesToFade = fadeEndInChunk - fadeStartInChunk;
+
+                    if (samplesToFade > 0)
                     {
-                        float* channelData = chunkBuffer.getWritePointer(channel);
-                        for (int i = 0; i < samplesToFade; ++i)
+                        const float fadeStartPos = static_cast<float>(startSample) / fadeInSamples;
+                        const float fadeEndPos = static_cast<float>(startSample + fadeEndInChunk) / fadeInSamples;
+                        for (int channel = 0; channel < numChannels; ++channel)
                         {
-                            const float fadePosition = fadeStartPos + (fadeEndPos - fadeStartPos) * i / samplesToFade;
-                            channelData[i] *= fadePosition;
+                            float* channelData = chunkBuffer.getWritePointer(channel);
+                            for (int i = 0; i < samplesToFade; ++i)
+                            {
+                                const float fadePosition = fadeStartPos + (fadeEndPos - fadeStartPos) * i / samplesToFade;
+                                channelData[i] *= fadePosition;
+                            }
                         }
                     }
                 }
             }
         }
-        
-        // Apply fade-out to last chunks if needed
+
         if (fadeOutDuration > 0.0)
         {
             const int fadeOutSamples = static_cast<int>(fadeOutDuration * sampleRate);
             const juce::int64 fadeOutStart = totalSamples - fadeOutSamples;
-            
             if (startSample + currentChunkSize > fadeOutStart)
             {
                 const juce::int64 fadeStartInChunk = juce::jmax(static_cast<juce::int64>(0), fadeOutStart - startSample);
-                const int fadeEndInChunk = currentChunkSize;
-                const int samplesToFade = fadeEndInChunk - static_cast<int>(fadeStartInChunk);
-                
+                const int samplesToFade = currentChunkSize - static_cast<int>(fadeStartInChunk);
                 if (samplesToFade > 0)
                 {
-                    // Calculate fade position relative to overall fade
                     const juce::int64 absoluteFadeStart = startSample + fadeStartInChunk;
                     const float fadeStartPos = static_cast<float>(absoluteFadeStart - fadeOutStart) / fadeOutSamples;
                     const float fadeEndPos = static_cast<float>(absoluteFadeStart + samplesToFade - fadeOutStart) / fadeOutSamples;
-                    
-                    // Apply partial fade
                     for (int channel = 0; channel < numChannels; ++channel)
                     {
                         float* channelData = chunkBuffer.getWritePointer(channel);
@@ -279,40 +299,31 @@ bool AudioRenderer::renderAudio(const juce::File& outputFile,
                 }
             }
         }
-        
-        // Apply limiter to this chunk if needed
+
         float peakLevel = 0.0f;
         for (int channel = 0; channel < numChannels; ++channel)
-        {
             peakLevel = juce::jmax(peakLevel, chunkBuffer.getMagnitude(channel, 0, currentChunkSize));
-        }
-        
-        if (peakLevel > 0.891f) // -1dB threshold
+
+        if (peakLevel > 0.891f)
         {
             const float limitFactor = 0.891f / peakLevel;
             for (int channel = 0; channel < numChannels; ++channel)
-            {
                 chunkBuffer.applyGain(channel, 0, currentChunkSize, limitFactor);
-            }
         }
-        
-        // Write this chunk to file
-        bool writeSuccess = writer->writeFromAudioSampleBuffer(chunkBuffer, 0, currentChunkSize);
-        if (!writeSuccess)
+
+        if (!writer->writeFromAudioSampleBuffer(chunkBuffer, 0, currentChunkSize))
         {
             if (logCallback)
                 logCallback("ERROR: Failed to write audio chunk " + juce::String(chunkIndex));
             return false;
         }
     }
-    
-    // Close the writer
+
     writer.reset();
-    
-    // Verify file was created
+
     if (outputFile.existsAsFile())
     {
-        juce::int64 fileSize = outputFile.getSize();
+        const juce::int64 fileSize = outputFile.getSize();
         if (logCallback)
         {
             logCallback("  Audio file created successfully: " + outputFile.getFullPathName());
@@ -321,209 +332,86 @@ bool AudioRenderer::renderAudio(const juce::File& outputFile,
         }
         return true;
     }
-    else
-    {
-        if (logCallback)
-            logCallback("ERROR: Audio file was not created");
-        return false;
-    }
+
+    if (logCallback)
+        logCallback("ERROR: Audio file was not created");
+    return false;
 }
 
 void AudioRenderer::applyFade(juce::AudioSampleBuffer& buffer,
-                           int startSample,
-                           int numSamples,
-                           bool fadeIn)
+                              int startSample,
+                              int numSamples,
+                              bool fadeIn)
 {
     const int numChannels = buffer.getNumChannels();
-    
+
     for (int channel = 0; channel < numChannels; ++channel)
     {
         float* data = buffer.getWritePointer(channel, startSample);
-        
+
         for (int i = 0; i < numSamples; ++i)
         {
             float alpha = static_cast<float>(i) / static_cast<float>(numSamples);
-            
             if (!fadeIn)
                 alpha = 1.0f - alpha;
-                
-            // Apply cubic fade curve for smoother sound
-            float gain = alpha * alpha * (3.0f - 2.0f * alpha);
-            
+
+            const float gain = alpha * alpha * (3.0f - 2.0f * alpha);
             data[i] *= gain;
         }
     }
 }
 
 bool AudioRenderer::renderFilePlayerOutput(FilePlayerAudioSource* filePlayer,
-                                         double durationSeconds,
-                                         const juce::File& outputFile)
+                                           double durationSeconds,
+                                           const juce::File& outputFile)
 {
-    if (logCallback)
-        logCallback("Rendering file player audio track for " + juce::String(durationSeconds) + " seconds");
+    filePlayers.clear();
+    if (filePlayer != nullptr)
+        filePlayers.push_back(filePlayer);
 
-    if (!filePlayer)
+    return renderFilePlayerOutput(outputFile, durationSeconds, 1.0, 1.0);
+}
+
+bool AudioRenderer::renderFilePlayerOutput(const juce::File& outputFile,
+                                           double durationSeconds,
+                                           double fadeInDuration,
+                                           double fadeOutDuration)
+{
+    if (filePlayers.empty())
     {
         if (logCallback)
             logCallback("ERROR: No file player audio source available");
         return false;
     }
-    
-    // Apply default fade values
-    // Store the passed filePlayer in the class member
-    this->filePlayer = filePlayer;
-    return renderFilePlayerOutput(outputFile, durationSeconds, 1.0, 1.0);
-}
 
-bool AudioRenderer::renderFilePlayerOutput(const juce::File& outputFile,
-                                         double durationSeconds,
-                                         double fadeInDuration,
-                                         double fadeOutDuration)
-{
-    try {
-        if (logCallback)
-            logCallback("Rendering file player audio track for " + juce::String(durationSeconds) + " seconds");
-    }
-    catch (const std::exception& e) {
-        // Continue even if logging fails
-    }
-    
-    // Check if we have a valid file player
-    if (!filePlayer)
-    {
-        try {
-            if (logCallback)
-                logCallback("ERROR: No file player audio source available");
-        }
-        catch (const std::exception& e) {
-            // Continue even if logging fails
-        }
-        return false;
-    }
-    
-    // Sample rate and channels
-    const int sampleRate = 44100;
-    const int numChannels = 2;
-    
-    // Calculate total samples
-    const int totalSamples = static_cast<int>(durationSeconds * sampleRate);
-    
-    // Create audio buffer
-    juce::AudioSampleBuffer buffer(numChannels, totalSamples);
-    buffer.clear();
-    
-    // Fill buffer with audio from file player
-    juce::AudioSourceChannelInfo info(&buffer, 0, totalSamples);
-    
-    try {
-        if (logCallback)
-            logCallback("  Rendering file audio");
-    }
-    catch (const std::exception& e) {
-        // Continue even if logging fails
-    }
-    
-    filePlayer->prepareToPlay(buffer.getNumSamples(), sampleRate);
-    filePlayer->getNextAudioBlock(info);
-    
-    // Apply fade-in
-    if (fadeInDuration > 0.0)
-    {
-        const int fadeInSamples = static_cast<int>(fadeInDuration * sampleRate);
-        applyFade(buffer, 0, fadeInSamples, true);
-    }
-    
-    // Apply fade-out
-    if (fadeOutDuration > 0.0)
-    {
-        const int fadeOutSamples = static_cast<int>(fadeOutDuration * sampleRate);
-        const int fadeOutStart = totalSamples - fadeOutSamples;
-        applyFade(buffer, fadeOutStart, fadeOutSamples, false);
-    }
-    
-    // Apply limiter at -1dB if needed
-    float peakLevel = 0.0f;
-    for (int channel = 0; channel < numChannels; ++channel)
-    {
-        peakLevel = juce::jmax(peakLevel, buffer.getMagnitude(channel, 0, totalSamples));
-    }
-    
-    if (peakLevel > 0.0f)
-    {
-        // Only apply limiting if the peak level exceeds our -1dB target (approx 0.891)
-        if (peakLevel > 0.891f)
-        {
-            // Apply limiting to -1dB to prevent clipping
-            const float limitFactor = 0.891f / peakLevel;
-            
-            if (logCallback)
-                logCallback("  Limiting audio peak to -1dB with factor: " + juce::String(limitFactor) + 
-                           " (peak was " + juce::String(peakLevel) + ")");
-            
-            for (int channel = 0; channel < numChannels; ++channel)
-            {
-                buffer.applyGain(channel, 0, totalSamples, limitFactor);
-            }
-        }
-        else
-        {
-            if (logCallback)
-                logCallback("  Audio level is good (peak: " + juce::String(peakLevel) + 
-                           "), no limiting needed");
-        }
-    }
-    
-    // Create WAV file
-    juce::WavAudioFormat wavFormat;
-    std::unique_ptr<juce::AudioFormatWriter> writer;
-    
-    writer.reset(wavFormat.createWriterFor(new juce::FileOutputStream(outputFile),
-                                         sampleRate,
-                                         numChannels,
-                                         24,   // 24-bit depth
-                                         {},   // No metadata
-                                         0));  // No compression
-    
-    if (writer == nullptr)
-    {
-        try {
-            if (logCallback)
-                logCallback("ERROR: Failed to create audio file writer");
-        }
-        catch (const std::exception& e) {
-            // Continue even if logging fails
-        }
-        return false;
-    }
-    
-    // Write the buffer to file
-    writer->writeFromAudioSampleBuffer(buffer, 0, totalSamples);
-    
-    try {
-        if (logCallback)
-            logCallback("  File audio rendering complete: " + outputFile.getFullPathName());
-    }
-    catch (const std::exception& e) {
-        // Continue even if logging fails
-    }
-    
-    return true;
+    auto savedBinaural = binauralSources;
+    auto savedNoise = noiseSources;
+    binauralSources.clear();
+    noiseSources.clear();
+
+    const bool success = renderAudio(outputFile, durationSeconds, fadeInDuration, fadeOutDuration);
+
+    binauralSources = savedBinaural;
+    noiseSources = savedNoise;
+    return success;
 }
 
 bool AudioRenderer::renderBinauralOutput(BinauralAudioSource* binauralSource,
-                                       double durationSeconds,
-                                       const juce::File& outputFile)
+                                         double durationSeconds,
+                                         const juce::File& outputFile)
 {
-    if (logCallback)
-        logCallback("Rendering binaural audio track for " + juce::String(durationSeconds) + " seconds");
+    binauralSources.clear();
+    if (binauralSource != nullptr)
+        binauralSources.push_back(binauralSource);
 
-    if (!binauralSource)
-    {
-        if (logCallback)
-            logCallback("ERROR: No binaural audio source available");
-        return false;
-    }
+    auto savedFilePlayers = filePlayers;
+    auto savedNoise = noiseSources;
+    filePlayers.clear();
+    noiseSources.clear();
 
-    this->binauralSource = binauralSource;
-    return renderAudio(outputFile, durationSeconds, 1.0, 1.0);
+    const bool success = renderAudio(outputFile, durationSeconds, 1.0, 1.0);
+
+    filePlayers = savedFilePlayers;
+    noiseSources = savedNoise;
+    return success;
 }

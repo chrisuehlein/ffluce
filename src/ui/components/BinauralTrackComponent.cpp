@@ -105,7 +105,8 @@ void BinauralTrackComponent::resized()
     auto r = getLocalBounds().reduced(4);
     
     // Skip over title
-    r.removeFromTop(25);
+    if (isTrackTitleVisible())
+        r.removeFromTop(25);
     
     // This is the area for our custom controls
     auto controlArea = r.removeFromTop(80); // Increased area for auto-play button

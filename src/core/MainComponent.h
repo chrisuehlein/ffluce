@@ -263,22 +263,20 @@ private:
     
     void saveProject();
     void loadProject();
+    void clearProject();
     void startRendering();
     void updateTransportState();
+    void rebuildAudioMixers();
+    void rebuildLocalMixerInputs();
+    void rebuildStreamingMixerInputs();
+    void startLocalFileTracks();
+    void stopLocalFileTracks();
+    void resetLocalFileTrackPositions(double positionSeconds);
     bool isPlaying() const { return transportState == Playing; }
-    
-    // Local playback audio sources (controlled by play/stop)
-    std::unique_ptr<BinauralAudioSource>  binauralSource;
-    std::unique_ptr<FilePlayerAudioSource> filePlayer;
-    std::unique_ptr<NoiseAudioSource>     noiseSource;
-    
-    // Streaming audio sources (always active for stream)
-    std::unique_ptr<BinauralAudioSource>  streamingBinauralSource;
-    std::unique_ptr<FilePlayerAudioSource> streamingFilePlayer;
-    std::unique_ptr<NoiseAudioSource>     streamingNoiseSource;
     
     juce::MixerAudioSource mixer;                    // Local playback mixer (controlled by play/stop)
     juce::MixerAudioSource streamingMixer;          // Always-on mixer for streaming audio
+    juce::CriticalSection audioGraphLock;
     
     // Transport state
     enum TransportState
@@ -296,6 +294,7 @@ private:
     // UI Sections
     juce::Label videoSectionLabel{ {}, "VIDEO" };
     juce::Label audioSectionLabel{ {}, "AUDIO" };
+    juce::TextButton addTrackButton{ "Add Track" };
     
     // Main panels
     AudioPanel audioPanel;
@@ -307,6 +306,7 @@ private:
     juce::Label presetsLabel{ {}, "PRESETS" };
     juce::TextButton saveButton{ "Save" };
     juce::TextButton loadButton{ "Load" };
+    juce::TextButton clearButton{ "Clear" };
     
     // Transport controls
     ImageTextButton playPauseButton;
@@ -383,87 +383,6 @@ private:
         juce::int64 totalFrames{0};
         bool isHealthy{false};
     } streamStats;
-    
-    // External track meters positioned between track cards
-    class SimpleTrackMeter : public juce::Component, private juce::Timer
-    {
-    public:
-        SimpleTrackMeter(const juce::String& labelText) : trackLabel(labelText)
-        {
-            trackLabel.setJustificationType(juce::Justification::centred);
-            trackLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-            addAndMakeVisible(trackLabel);
-            
-            startTimerHz(30);
-            level = 0.0f;
-            peak = 0.0f;
-        }
-        
-        void setLevel(float newLevel)
-        {
-            level = newLevel;
-            if (newLevel > peak) peak = newLevel;
-            peak *= 0.95f; // Decay
-        }
-        
-        void paint(juce::Graphics& g) override
-        {
-            auto bounds = getLocalBounds();
-            auto labelArea = bounds.removeFromTop(20);
-            auto meterArea = bounds.reduced(2);
-            
-            // Background
-            g.setColour(juce::Colours::black);
-            g.fillRect(meterArea);
-            
-            // Draw dB scale tick marks and labels
-            g.setColour(juce::Colours::lightgrey);
-            g.setFont(8.0f);
-            
-            // Draw ticks for 0dB, -12dB, -24dB, -60dB
-            float dBValues[] = {0.0f, -12.0f, -24.0f, -60.0f};
-            for (int i = 0; i < 4; ++i)
-            {
-                float dbNorm = (dBValues[i] + 60.0f) / 60.0f;
-                int yPos = meterArea.getBottom() - (int)(meterArea.getHeight() * dbNorm);
-                
-                // Tick mark on right side
-                g.drawLine(meterArea.getRight() - 8, yPos, meterArea.getRight(), yPos, 1.0f);
-                
-                // Label
-                juce::String label = (dBValues[i] == 0.0f) ? "0" : juce::String((int)dBValues[i]);
-                g.drawText(label, meterArea.getRight() - 25, yPos - 6, 20, 12, juce::Justification::centredRight);
-            }
-            
-            // Level bar
-            float levelDb = juce::Decibels::gainToDecibels(level, -60.0f);
-            float levelNorm = (levelDb + 60.0f) / 60.0f;
-            int levelHeight = (int)(meterArea.getHeight() * levelNorm);
-            
-            auto levelRect = meterArea.removeFromBottom(levelHeight).reduced(2, 0);
-            if (levelNorm < 0.75f)
-                g.setColour(juce::Colours::green.interpolatedWith(juce::Colours::yellow, levelNorm / 0.75f));
-            else
-                g.setColour(juce::Colours::yellow.interpolatedWith(juce::Colours::red, (levelNorm - 0.75f) / 0.25f));
-            g.fillRect(levelRect);
-        }
-        
-        void resized() override
-        {
-            auto bounds = getLocalBounds();
-            trackLabel.setBounds(bounds.removeFromTop(20));
-        }
-        
-    private:
-        void timerCallback() override { repaint(); }
-        
-        juce::Label trackLabel;
-        float level, peak;
-    };
-    
-    SimpleTrackMeter binauralMeter{ "BIN" };
-    SimpleTrackMeter fileMeter{ "FILE" };
-    SimpleTrackMeter noiseMeter{ "NOISE" };
     
     // Background colors - more visually distinctive
     juce::Colour videoSectionColor = juce::Colour(60, 60, 80);   // Blue-ish

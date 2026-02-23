@@ -10,15 +10,27 @@ YoutubeStreamer::YoutubeStreamer() : juce::Thread("YoutubeStreamer")
 
 YoutubeStreamer::~YoutubeStreamer()
 {
+    juce::Logger::writeToLog("~YoutubeStreamer: Starting destructor");
     streamingActive = false;
 
+    juce::Logger::writeToLog("~YoutubeStreamer: Killing FFmpeg if running...");
+    // Kill FFmpeg first so thread unblocks
+    if (ffmpegProcess && ffmpegProcess->isRunning())
+        ffmpegProcess->kill();
+
+    juce::Logger::writeToLog("~YoutubeStreamer: Checking if thread running: " + juce::String(isThreadRunning() ? "yes" : "no"));
     if (isThreadRunning())
     {
+        juce::Logger::writeToLog("~YoutubeStreamer: Signaling thread to exit...");
         signalThreadShouldExit();
-        waitForThreadToExit(10000);
+        juce::Logger::writeToLog("~YoutubeStreamer: Waiting for thread...");
+        waitForThreadToExit(3000);
+        juce::Logger::writeToLog("~YoutubeStreamer: Thread exited");
     }
 
+    juce::Logger::writeToLog("~YoutubeStreamer: Cleaning up pipeline...");
     cleanupFFmpegPipeline();
+    juce::Logger::writeToLog("~YoutubeStreamer: Destructor complete");
 }
 
 void YoutubeStreamer::setSequence(const std::vector<RenderTypes::VideoClipInfo>& intro,
@@ -63,19 +75,35 @@ bool YoutubeStreamer::startStreaming(const juce::String& rtmpUrlOrKey, int platf
 
 void YoutubeStreamer::stopStreaming()
 {
+    juce::Logger::writeToLog("YoutubeStreamer::stopStreaming() called, streamingActive=" + juce::String(streamingActive ? "true" : "false"));
+
     if (!streamingActive)
+    {
+        juce::Logger::writeToLog("YoutubeStreamer::stopStreaming() - not active, returning early");
         return;
+    }
 
     streamingActive = false;
 
+    juce::Logger::writeToLog("YoutubeStreamer::stopStreaming() - killing FFmpeg...");
+    // Kill FFmpeg FIRST so the thread unblocks from readProcessOutput()
+    if (ffmpegProcess && ffmpegProcess->isRunning())
+    {
+        ffmpegProcess->kill();
+    }
+
+    juce::Logger::writeToLog("YoutubeStreamer::stopStreaming() - waiting for thread...");
+    // Now wait for thread - it should exit quickly since FFmpeg is dead
     if (isThreadRunning())
     {
         signalThreadShouldExit();
-        waitForThreadToExit(60000);
+        waitForThreadToExit(3000);  // 3 seconds is plenty now
     }
 
+    juce::Logger::writeToLog("YoutubeStreamer::stopStreaming() - cleaning up pipeline...");
     cleanupFFmpegPipeline();
 
+    juce::Logger::writeToLog("YoutubeStreamer::stopStreaming() - done");
     if (onStatusUpdate) onStatusUpdate("Streaming stopped");
 }
 
@@ -151,11 +179,95 @@ void YoutubeStreamer::run()
             }
         }
 
-        if (ffmpegProcess && !ffmpegProcess->isRunning())
+        // Auto-restart if FFmpeg stopped but we still want to stream
+        if (ffmpegProcess && !ffmpegProcess->isRunning() && streamingActive && !threadShouldExit())
         {
-            juce::MessageManager::callAsync([this]() {
-                if (onError) onError("FFmpeg process stopped unexpectedly");
-            });
+            int restartAttempts = 0;
+            const int maxRestarts = 5;
+
+            while (streamingActive && !threadShouldExit() && restartAttempts < maxRestarts)
+            {
+                restartAttempts++;
+
+                juce::MessageManager::callAsync([this, restartAttempts]() {
+                    if (onStatusUpdate)
+                        onStatusUpdate("FFmpeg stopped - auto-restart attempt " + juce::String(restartAttempts) + "...");
+                });
+
+                if (debugLogger)
+                    debugLogger->logEvent("RESTART", "Auto-restart attempt " + juce::String(restartAttempts));
+
+                // Clean up old process
+                cleanupFFmpegPipeline();
+
+                // Wait before restart
+                wait(3000);
+
+                if (!streamingActive || threadShouldExit())
+                    break;
+
+                // Try to restart
+                if (setupFFmpegPipeline())
+                {
+                    juce::MessageManager::callAsync([this]() {
+                        if (onStatusUpdate) onStatusUpdate("Stream restarted successfully!");
+                    });
+
+                    // Reset monitor count for new session
+                    monitorCount = 0;
+
+                    // Continue monitoring the new process
+                    while (!threadShouldExit() && streamingActive && ffmpegProcess && ffmpegProcess->isRunning())
+                    {
+                        wait(500);
+                        monitorCount++;
+
+                        char buffer[4096];
+                        int bytesRead = ffmpegProcess->readProcessOutput(buffer, sizeof(buffer) - 1);
+                        if (bytesRead > 0)
+                        {
+                            juce::String output;
+                            for (int i = 0; i < bytesRead; ++i)
+                            {
+                                unsigned char byte = static_cast<unsigned char>(buffer[i]);
+                                if (byte < 128 && (byte >= 32 || byte == 9 || byte == 10 || byte == 13))
+                                    output += static_cast<char>(byte);
+                            }
+                            if (output.isNotEmpty())
+                                processProgressOutput(output);
+                        }
+
+                        if (monitorCount % 20 == 0)
+                        {
+                            double elapsedSeconds = monitorCount * 0.5;
+                            juce::MessageManager::callAsync([this, elapsedSeconds]() {
+                                if (onStatusUpdate)
+                                    onStatusUpdate("Streaming active for " + juce::String((int)elapsedSeconds) + " seconds");
+                            });
+                        }
+                    }
+
+                    // If we exited the loop but still want to stream, continue restart attempts
+                    if (ffmpegProcess && !ffmpegProcess->isRunning() && streamingActive && !threadShouldExit())
+                        continue;
+                    else
+                        break;
+                }
+                else
+                {
+                    juce::MessageManager::callAsync([this, restartAttempts]() {
+                        if (onStatusUpdate)
+                            onStatusUpdate("Restart attempt " + juce::String(restartAttempts) + " failed");
+                    });
+                }
+            }
+
+            if (restartAttempts >= maxRestarts && streamingActive)
+            {
+                juce::MessageManager::callAsync([this]() {
+                    if (onError) onError("FFmpeg stopped - max restart attempts reached");
+                });
+            }
         }
     }
     catch (const std::exception& e)
@@ -326,12 +438,23 @@ juce::String YoutubeStreamer::buildStreamingCommand()
     command += " -thread_queue_size 8192 -f f32le -ar " + juce::String(pipeSampleRate) + " -ac 2 -i " + audioPipePath.quoted();
     command += videoMapping;
     command += " -map " + juce::String(audioInputIndex) + ":a";
-    command += " -avoid_negative_ts make_zero -fflags +genpts";
+    // Timestamp and buffer handling for long streams
+    command += " -avoid_negative_ts make_zero -fflags +genpts+igndts";
+    command += " -max_muxing_queue_size 1024";
+    command += " -vsync cfr";  // Constant frame rate for stability
 
     if (streamingBitrate <= 0)
         streamingBitrate = 9000;
 
-    command += " -c:v h264_nvenc -preset p2 -tune ll -rc cbr";
+    // Video encoding - try NVENC first, fallback handled by having tested during setup
+    if (streamingUseNVENC)
+    {
+        command += " -c:v h264_nvenc -preset p2 -tune ll -rc cbr";
+    }
+    else
+    {
+        command += " -c:v libx264 -preset veryfast -tune zerolatency";
+    }
     command += " -b:v " + juce::String(streamingBitrate) + "k";
     command += " -maxrate " + juce::String(int(streamingBitrate * 1.1)) + "k";
     command += " -bufsize " + juce::String(streamingBitrate * 2) + "k";
@@ -340,7 +463,7 @@ juce::String YoutubeStreamer::buildStreamingCommand()
     command += " -pix_fmt yuv420p -framerate 30 -r 30";
     command += " -f flv -flvflags no_duration_filesize";
     command += " -nostdin -loglevel info -stats -stats_period 0.5";
-    command += " -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2";
+    command += " -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5";
     command += " " + rtmpUrl.quoted();
 
     return command;

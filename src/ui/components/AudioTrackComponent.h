@@ -102,6 +102,13 @@ public:
     // Access fader value
     float getGain() const               { return fader.getValue(); }
     void setGain(float newGain)         { fader.setValue(newGain); }
+    void setTrackTitleVisible(bool shouldBeVisible)
+    {
+        showTrackTitle = shouldBeVisible;
+        trackTitle.setVisible(shouldBeVisible);
+        resized();
+    }
+    bool isTrackTitleVisible() const    { return showTrackTitle; }
 
     // Parent can set these callbacks
     std::function<void(AudioTrackComponent*)>        onSoloChanged;
@@ -134,23 +141,31 @@ public:
     {
         auto totalBounds = getLocalBounds().reduced(2);
         int totalHeight = totalBounds.getHeight();
-        int totalWidth = totalBounds.getWidth();
         
         // Percentage-based layout
-        int titleHeight = (int)(totalHeight * 0.08); // 8% for title
+        int titleHeight = showTrackTitle ? (int)(totalHeight * 0.08) : 0; // 8% for title
         int controlsHeight = (int)(totalHeight * 0.12); // 12% for derived controls
         int buttonHeight = (int)(totalHeight * 0.10); // 10% for mute/solo buttons at bottom
         int valueHeight = (int)(totalHeight * 0.06); // 6% for value label
         
         // Ensure minimum sizes
-        titleHeight = juce::jmax(titleHeight, 20);
+        if (showTrackTitle)
+            titleHeight = juce::jmax(titleHeight, 20);
         controlsHeight = juce::jmax(controlsHeight, 40);
         buttonHeight = juce::jmax(buttonHeight, 25);
         valueHeight = juce::jmax(valueHeight, 18);
         
-        // Track title at the very top
-        auto titleArea = totalBounds.removeFromTop(titleHeight);
-        trackTitle.setBounds(titleArea);
+        if (showTrackTitle)
+        {
+            auto titleArea = totalBounds.removeFromTop(titleHeight);
+            trackTitle.setBounds(titleArea);
+            trackTitle.setVisible(true);
+        }
+        else
+        {
+            trackTitle.setVisible(false);
+            trackTitle.setBounds({});
+        }
         
         // Leave space for derived components to add their controls
         auto controlsArea = totalBounds.removeFromTop(controlsHeight);
@@ -176,17 +191,22 @@ public:
         // The remaining area is for the fader and meter - this fills the space between
         auto faderArea = totalBounds.reduced(2);
         int faderHeight = faderArea.getHeight();
+        auto meterArea = faderArea.removeFromRight(14).reduced(1, 2);
         
-        // Just center the fader - no internal meter or scale labels
+        // Center the fader in the remaining area and keep a right-edge meter visible
         int faderWidth = 25;
         int startX = faderArea.getX() + (faderArea.getWidth() - faderWidth) / 2;
         
         // Position fader centered
         fader.setBounds(startX, faderArea.getY(), faderWidth, faderHeight);
         
-        // Hide internal meter and scale labels
         if (trackMeter)
-            trackMeter->setVisible(false);
+        {
+            trackMeter->setVisible(true);
+            trackMeter->setBounds(meterArea);
+        }
+
+        // Keep scale labels hidden for cleaner compact strips
         for (auto* label : dbScaleLabels)
             label->setVisible(false);
     }
@@ -340,6 +360,7 @@ protected:
     };
     
     std::unique_ptr<TrackMeterComponent> trackMeter;
+    bool showTrackTitle{ true };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioTrackComponent)
 };

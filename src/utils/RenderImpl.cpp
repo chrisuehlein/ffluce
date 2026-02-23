@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include "RenderManager.h"
+#include "LastDirectories.h"
 #include "../core/RenderDialog.h"
 #include "../audio/BinauralAudioSource.h"
 #include "../audio/FilePlayerAudioSource.h"
@@ -10,9 +11,9 @@
 #include "../rendering/FFmpegExecutor.h"
 
 RenderDialog::RenderDialog(
-    BinauralAudioSource* binauralSource,
-    FilePlayerAudioSource* filePlayer,
-    NoiseAudioSource* noiseSource,
+    const std::vector<BinauralAudioSource*>& binauralSources,
+    const std::vector<FilePlayerAudioSource*>& filePlayers,
+    const std::vector<NoiseAudioSource*>& noiseSources,
     const std::vector<RenderManager::VideoClipInfo>& introClips,
     const std::vector<RenderManager::VideoClipInfo>& loopClips,
     const std::vector<RenderManager::OverlayClipInfo>& overlayClips,
@@ -24,9 +25,9 @@ RenderDialog::RenderDialog(
       outputFile()
 {
     // Store the parameters
-    this->binauralSource = binauralSource;
-    this->filePlayer = filePlayer;
-    this->noiseSource = noiseSource;
+    this->binauralSources = binauralSources;
+    this->filePlayers = filePlayers;
+    this->noiseSources = noiseSources;
     this->introClips = introClips;
     this->loopClips = loopClips;
     this->overlayClips = overlayClips;
@@ -43,10 +44,13 @@ RenderDialog::RenderDialog(
 RenderDialog::~RenderDialog()
 {
     stopTimer();
-    
-    // Cancel rendering if in progress
-    if (renderManager && renderManager->isRendering())
+
+    // Cancel and wait for rendering to stop
+    if (renderManager)
+    {
         renderManager->cancelRendering();
+        // renderManager destructor will handle thread cleanup
+    }
 }
 
 void RenderDialog::setupUI()
@@ -80,15 +84,18 @@ void RenderDialog::setupUI()
     filePathEditor.setText(outputFile.getFullPathName(), false);
     
     addAndMakeVisible(browseButton);
-    browseButton.onClick = [this] { 
-        fileChooser = std::make_unique<juce::FileChooser>("Save Output File", 
-                                                         outputFile, 
+    browseButton.onClick = [this] {
+        auto startDir = outputFile.existsAsFile() ? outputFile :
+                        LastDirectories::getInstance().getLastDirectory(LastDirectories::RenderOutput);
+        fileChooser = std::make_unique<juce::FileChooser>("Save Output File",
+                                                         startDir,
                                                          audioOnlyToggle.getToggleState() ? "*.wav" : "*.mp4");
-        
-        fileChooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles, 
+
+        fileChooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
             [this](const juce::FileChooser& fc) {
                 if (fc.getResult().existsAsFile() || fc.getResult().getParentDirectory().isDirectory()) {
                     outputFile = fc.getResult();
+                    LastDirectories::getInstance().rememberFile(LastDirectories::RenderOutput, outputFile);
                     filePathEditor.setText(outputFile.getFullPathName(), false);
                 }
             });
@@ -370,7 +377,7 @@ void RenderDialog::startRender()
     juce::String finalCpuParams = getEncodingParams(false, true);
     
     // Create a render manager
-    renderManager = std::make_unique<RenderManager>(binauralSource, filePlayer, noiseSource);
+    renderManager = std::make_unique<RenderManager>(binauralSources, filePlayers, noiseSources);
     
     // Check if NVENC is actually available before enabling it
     bool userWantsNvenc = useNvidiaAcceleration.getToggleState();
@@ -506,51 +513,31 @@ juce::File RenderDialog::generateDefaultOutputFile(bool audioOnly) const
 juce::String RenderDialog::buildRenderDescriptor() const
 {
     juce::StringArray parts;
+    int activeBinaural = 0;
+    int activeFile = 0;
+    int activeNoise = 0;
 
-    if (binauralSource != nullptr)
+    for (auto* source : binauralSources)
     {
-        juce::String token = "Binaural";
-        token += "-L" + formatValueToken(binauralSource->getLeftFrequency(), 1) + "Hz";
-        token += "-R" + formatValueToken(binauralSource->getRightFrequency(), 1) + "Hz";
-        token += "-G" + formatValueToken(binauralSource->getGain(), 2);
-        parts.add(token);
-    }
-    else
-    {
-        parts.add("Binaural-NA");
+        if (source != nullptr && source->getGain() > 0.0001f)
+            ++activeBinaural;
     }
 
-    if (filePlayer != nullptr && filePlayer->isLoaded())
+    for (auto* source : filePlayers)
     {
-        juce::String trackName = sanitizeToken(filePlayer->getLoadedFile().getFileNameWithoutExtension());
-        juce::String token = "Music-" + trackName + "-G" + formatValueToken(filePlayer->getGain(), 2);
-        parts.add(token);
-    }
-    else
-    {
-        parts.add("Music-Off");
+        if (source != nullptr && source->isLoaded() && source->getGain() > 0.0001f)
+            ++activeFile;
     }
 
-    if (noiseSource != nullptr)
+    for (auto* source : noiseSources)
     {
-        if (!noiseSource->isMuted() && noiseSource->getGain() > 0.0001f)
-        {
-            juce::String typeName = "White";
-            switch (noiseSource->getNoiseType())
-            {
-                case NoiseAudioSource::White: typeName = "White"; break;
-                case NoiseAudioSource::Pink:  typeName = "Pink";  break;
-                case NoiseAudioSource::Brown: typeName = "Brown"; break;
-            }
-
-            juce::String token = "Noise-" + typeName + "-G" + formatValueToken(noiseSource->getGain(), 2);
-            parts.add(token);
-        }
-        else
-        {
-            parts.add("NoiseMuted");
-        }
+        if (source != nullptr && !source->isMuted() && source->getGain() > 0.0001f)
+            ++activeNoise;
     }
+
+    parts.add("Bin-" + juce::String(activeBinaural));
+    parts.add("File-" + juce::String(activeFile));
+    parts.add("Noise-" + juce::String(activeNoise));
 
     if (parts.isEmpty())
         parts.add("Render");

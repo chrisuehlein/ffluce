@@ -227,22 +227,29 @@ bool TimelineAssembler::conformInputClips(const std::vector<RenderTypes::VideoCl
     {
         juce::String cmd = executor->getFFmpegPath() + " -y";
 
-        if (clipDuration > effectiveSourceDuration + 0.1)
+        // If clip duration exceeds source, loop the input to extend it
+        double safeDuration = juce::jmax(0.1, effectiveSourceDuration);
+        bool needsLooping = clipDuration > safeDuration + 0.1;
+
+        if (needsLooping)
         {
-            int loopCount = (int)std::ceil(clipDuration / effectiveSourceDuration);
-            cmd += " -stream_loop " + juce::String(loopCount - 1) +
-                   " -i \"" + source.getFullPathName() + "\"";
+            int loopCount = (int)std::ceil(clipDuration / safeDuration);
+            loopCount = juce::jmin(loopCount, 100);  // Cap at 100 loops max
+            cmd += " -stream_loop " + juce::String(loopCount - 1);
         }
-        else
-        {
-            cmd += " -i \"" + source.getFullPathName() + "\"";
-        }
+
+        cmd += " -i \"" + source.getFullPathName() + "\"";
 
         if (safeStartTime > 0.001)
             cmd += " -ss " + juce::String(safeStartTime);
 
-        cmd += " -t " + juce::String(clipDuration) +
-               " " + encodingParams +
+        cmd += " -t " + juce::String(clipDuration);
+
+        // When looping, we need to regenerate timestamps to avoid concat issues
+        if (needsLooping)
+            cmd += " -fflags +genpts -avoid_negative_ts make_zero";
+
+        cmd += " " + encodingParams +
                " -pix_fmt yuv420p -an \"" + destination.getFullPathName() + "\"";
 
         return cmd;
@@ -319,18 +326,18 @@ bool TimelineAssembler::conformInputClips(const std::vector<RenderTypes::VideoCl
         else if (logCallback && clip.startTime != 0.0)
             logCallback("WARNING: Invalid startTime " + juce::String(clip.startTime) + " corrected to 0.0");
 
-        // Clamp requested duration to the available range
+        // Get requested duration - allow durations longer than source (will loop)
         double requestedDuration = clip.duration;
-        if (!std::isfinite(requestedDuration) || requestedDuration <= 0.0 || requestedDuration > sourceDuration)
+        if (!std::isfinite(requestedDuration) || requestedDuration <= 0.0)
             requestedDuration = sourceDuration;
 
-        const double effectiveSourceDuration = juce::jmax(0.0, sourceDuration - safeStartTime);
+        const double effectiveSourceDuration = juce::jmax(0.1, sourceDuration - safeStartTime);
 
-        if (requestedDuration > effectiveSourceDuration) {
-            if (logCallback)
-                logCallback("WARNING: Requested duration " + juce::String(clip.duration) + " exceeds available " +
-                            juce::String(effectiveSourceDuration) + ", clamping.");
-            requestedDuration = effectiveSourceDuration;
+        // Log if we'll be looping to achieve the requested duration
+        if (requestedDuration > effectiveSourceDuration + 0.1 && logCallback) {
+            int loopCount = (int)std::ceil(requestedDuration / effectiveSourceDuration);
+            logCallback("INFO: Will loop source " + juce::String(loopCount) + " times to achieve " +
+                        juce::String(requestedDuration) + "s from " + juce::String(effectiveSourceDuration) + "s source");
         }
 
         if (logCallback)
@@ -579,7 +586,11 @@ bool TimelineAssembler::finalLoopSequenceAssembly(const juce::File& tempDirector
     juce::File loopFromLoopBodyCutInCutOut = tempDirectory.getChildFile("loop_from_loop_body_cut_in_cut_out.mp4");
     juce::File loopFromLoopSequence = tempDirectory.getChildFile("loop_from_loop_sequence.mp4");
 
-    if (loopFromLoopSequenceX.existsAsFile()) {
+    const bool shouldUseLoopCrossfade = !loopClips.empty()
+        && loopClips.size() > 1
+        && loopClips.back().crossfade > 0.001;
+
+    if (shouldUseLoopCrossfade && loopFromLoopSequenceX.existsAsFile()) {
         // Normal case: crossfade exists, concatenate crossfade + body
         if (!concatenateTwoFiles(loopFromLoopSequenceX, loopFromLoopBodyCutInCutOut, loopFromLoopSequence)) {
             return false;
@@ -1538,9 +1549,16 @@ bool TimelineAssembler::extractLoopVariants(const juce::File& loopSequenceRaw, c
         
         // Extract loop_from_intro_body_cut_in_cut_out (remaining part after removing first n seconds AND last loop crossfade seconds)
         juce::File loopFromIntroBody = tempDirectory.getChildFile("loop_from_intro_body_cut_in_cut_out.mp4");
-        
+
         double bodyDuration = rawDuration - actualIntroCrossfade - actualLoopCrossfade;  // Cut off BOTH ends!
-        
+
+        if (logCallback) {
+            logCallback("  Body extraction: rawDuration=" + juce::String(rawDuration) +
+                        ", introCrossfade=" + juce::String(actualIntroCrossfade) +
+                        ", loopCrossfade=" + juce::String(actualLoopCrossfade) +
+                        ", bodyDuration=" + juce::String(bodyDuration));
+        }
+
         // Additional safety check for negative or zero durations
         if (bodyDuration <= 0.1) {
             if (logCallback) logCallback("Single clip detected - using full sequence as body (no crossfade extraction needed)");
@@ -1556,15 +1574,40 @@ bool TimelineAssembler::extractLoopVariants(const juce::File& loopSequenceRaw, c
                 " -t " + juce::String(bodyDuration) +
                 " " + encodingParams +  // Lossless encoding already includes codec
                 " -an \"" + loopFromIntroBody.getFullPathName() + "\"";
-            
+
+            if (logCallback) logCallback("  Running: " + extractBodyCommand);
+
             if (!ffmpegExecutor->executeCommand(extractBodyCommand, 0.0, 1.0)) {
-                if (logCallback) logCallback("ERROR: Failed to extract loop_from_intro_body");
+                if (logCallback) logCallback("ERROR: Failed to extract loop_from_intro_body (command failed)");
                 return false;
             }
         }
         
     } else if (variantType == "loop_based") {
         double loopCrossfadeDuration = loopClips.empty() ? 0.0 : loopClips.back().crossfade;
+
+        // Seamless single-clip/no-crossfade path: keep the raw loop sequence intact.
+        // Re-encoding/extraction here can shave frames and introduce stutter on repeat.
+        if (loopClips.size() <= 1 || loopCrossfadeDuration <= 0.001) {
+            juce::File loopFromLoopBody = tempDirectory.getChildFile("loop_from_loop_body_cut_in_cut_out.mp4");
+            if (!copyFile(loopSequenceRaw, loopFromLoopBody)) {
+                if (logCallback) logCallback("ERROR: Failed to copy raw loop sequence for seamless loop");
+                return false;
+            }
+
+            // Ensure downstream steps don't accidentally use stale transition artefacts.
+            tempDirectory.getChildFile("loop_from_loop_sequence_x_out.mp4").deleteFile();
+            tempDirectory.getChildFile("loop_from_loop_sequence_x_in.mp4").deleteFile();
+            tempDirectory.getChildFile("loop_from_loop_sequence_x.mp4").deleteFile();
+
+            if (logCallback) {
+                if (loopClips.size() <= 1)
+                    logCallback("Single loop clip detected; using full raw loop sequence as loop body");
+                else
+                    logCallback("No loop crossfade configured; using full raw loop sequence as loop body");
+            }
+            return true;
+        }
 
         // Extract X_OUT (last N seconds of loop sequence for fade out)
         juce::File loopFromLoopXOut = tempDirectory.getChildFile("loop_from_loop_sequence_x_out.mp4");

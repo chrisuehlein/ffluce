@@ -3,6 +3,7 @@
 #include "../rendering/RenderManager.h"
 #include "../rendering/RenderTypes.h"
 #include "../audio/NoiseAudioSource.h"
+#include <vector>
 
 /**
  * Dialog for initiating and monitoring the rendering process
@@ -60,9 +61,9 @@ public:
     
     /**
      * Creates a new render dialog
-     * @param binauralSource The binaural audio source
-     * @param filePlayer The file audio player source
-     * @param noiseSource The noise audio source
+     * @param binauralSources Binaural audio sources
+     * @param filePlayers File audio sources
+     * @param noiseSources Noise audio sources
      * @param introClips Vector of intro video clips
      * @param loopClips Vector of loop video clips
      * @param duration Total duration in seconds
@@ -70,9 +71,9 @@ public:
      * @param fadeOut Fade-out duration in seconds
      */
     RenderDialog(
-        BinauralAudioSource* binauralSource,
-        FilePlayerAudioSource* filePlayer,
-        NoiseAudioSource* noiseSource,
+        const std::vector<BinauralAudioSource*>& binauralSources,
+        const std::vector<FilePlayerAudioSource*>& filePlayers,
+        const std::vector<NoiseAudioSource*>& noiseSources,
         const std::vector<RenderManager::VideoClipInfo>& introClips,
         const std::vector<RenderManager::VideoClipInfo>& loopClips,
         const std::vector<RenderManager::OverlayClipInfo>& overlayClips,
@@ -146,9 +147,9 @@ private:
     juce::Label qualityDescription{"", ""};
     
     // Member variables for rendering
-    BinauralAudioSource* binauralSource;
-    FilePlayerAudioSource* filePlayer;
-    NoiseAudioSource* noiseSource;
+    std::vector<BinauralAudioSource*> binauralSources;
+    std::vector<FilePlayerAudioSource*> filePlayers;
+    std::vector<NoiseAudioSource*> noiseSources;
     std::vector<RenderManager::VideoClipInfo> introClips;
     std::vector<RenderManager::VideoClipInfo> loopClips;
     std::vector<RenderManager::OverlayClipInfo> overlayClips;

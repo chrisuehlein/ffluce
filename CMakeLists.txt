@@ -100,6 +100,7 @@ set(FFLUCE_SOURCES
 
     # ui - panels
     src/ui/panels/AudioPanel.h
+    src/ui/panels/AudioPanel.cpp
     src/ui/panels/VideoPanel.h
     src/ui/panels/VideoPanel.cpp
     src/ui/panels/VideoPreviewComponent.h

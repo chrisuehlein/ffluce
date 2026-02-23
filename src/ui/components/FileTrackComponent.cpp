@@ -1,4 +1,5 @@
 ﻿#include "FileTrackComponent.h"
+#include "../../utils/LastDirectories.h"
 #include <JuceHeader.h>
 
 namespace
@@ -189,9 +190,6 @@ FileTrackComponent::FileTrackComponent(FilePlayerAudioSource* src, FilePlayerAud
         if (streamingFileSource) streamingFileSource->setGain(actualGain);
     };
 
-    if (trackMeter)
-        trackMeter->setVisible(false);
-
     if (fileSource != nullptr)
         playlistItems = fileSource->getPlaylist();
 
@@ -202,10 +200,20 @@ void FileTrackComponent::resized()
 {
     auto bounds = getLocalBounds().reduced(6);
 
-    auto titleArea = bounds.removeFromTop(24);
-    trackTitle.setBounds(titleArea);
+    if (isTrackTitleVisible())
+    {
+        auto titleArea = bounds.removeFromTop(24);
+        trackTitle.setBounds(titleArea);
+        bounds.removeFromTop(4);
+    }
+    else
+    {
+        trackTitle.setBounds({});
+        trackTitle.setVisible(false);
+    }
 
-    bounds.removeFromTop(4);
+    if (isTrackTitleVisible())
+        trackTitle.setVisible(true);
 
     const int totalWidth = bounds.getWidth();
     const int playlistMinWidth = 220;
@@ -233,6 +241,13 @@ void FileTrackComponent::resized()
     playlistPlaceholder.toFront(false);
 
     auto sliderArea = rightArea.reduced(6);
+    auto meterArea = sliderArea.removeFromRight(16);
+    if (trackMeter)
+    {
+        trackMeter->setVisible(true);
+        trackMeter->setBounds(meterArea.reduced(1, 2));
+    }
+
     auto muteSoloArea = sliderArea.removeFromBottom(32);
     auto muteBounds = muteSoloArea.removeFromLeft((muteSoloArea.getWidth() - 6) / 2);
     muteButton.setBounds(muteBounds.reduced(2));
@@ -270,6 +285,13 @@ void FileTrackComponent::loadAudioFile(const juce::File& file)
     FilePlayerAudioSource::PlaylistItem single = FilePlayerAudioSource::PlaylistItem::createAudio(file, -1, 0.0, 0.0);
     playlistItems.clear();
     playlistItems.push_back(single);
+    refreshPlaylist();
+}
+
+void FileTrackComponent::clearPlaylist()
+{
+    playlistItems.clear();
+    selectedRow = -1;
     refreshPlaylist();
 }
 
@@ -411,7 +433,7 @@ void FileTrackComponent::showAddMenu()
 void FileTrackComponent::addAudioItem()
 {
     fileChooser.reset(new juce::FileChooser("Select Audio File",
-                                            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                                            LastDirectories::getInstance().getLastDirectory(LastDirectories::Audio),
                                             "*.wav;*.mp3;*.aiff;*.ogg;*.flac"));
 
     fileChooser->launchAsync(juce::FileBrowserComponent::openMode |
@@ -422,7 +444,9 @@ void FileTrackComponent::addAudioItem()
         if (!selectedFile.existsAsFile())
             return;
 
-        playlistItems.push_back(FilePlayerAudioSource::PlaylistItem::createAudio(selectedFile, 1, 0.0, 2.0));
+        LastDirectories::getInstance().rememberFile(LastDirectories::Audio, selectedFile);
+        // New single-item audio tracks should loop by default.
+        playlistItems.push_back(FilePlayerAudioSource::PlaylistItem::createAudio(selectedFile, 0, 0.0, 0.0));
         selectedRow = (int)playlistItems.size() - 1;
         refreshPlaylist();
     });

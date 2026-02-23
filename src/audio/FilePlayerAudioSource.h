@@ -235,6 +235,12 @@ private:
         auto* rawResampler = new juce::ResamplingAudioSource(readerTarget.get(), false, 2);
         resamplerTarget.reset(rawResampler);
         resamplerTarget->prepareToPlay(lastBlockSize, deviceSampleRate);
+
+        // Match source file sample rate to current device/render sample rate.
+        // Ratio > 1 speeds up source consumption, ratio < 1 slows it down.
+        if (loadedFileSampleRate > 0.0 && deviceSampleRate > 0.0)
+            resamplerTarget->setResamplingRatio(loadedFileSampleRate / deviceSampleRate);
+
         return true;
     }
 
@@ -249,9 +255,11 @@ private:
         const auto& item = playlistItems[index];
         state.itemIndex = index;
         state.crossfadeSamples = juce::jmax(0.0, item.crossfadeSeconds * deviceSampleRate);
+        const bool singleItemContinuousLoop = shouldUseContinuousSingleItemLoop(item);
         state.infinite = (item.type == PlaylistItem::ItemType::AudioFile &&
-                          item.repetitions <= 0 && item.targetDurationSeconds <= 0.0);
-        state.itemTotalSamples = computeItemLengthSamples(item);
+                          item.targetDurationSeconds <= 0.0 &&
+                          (item.repetitions <= 0 || singleItemContinuousLoop));
+        state.itemTotalSamples = computeItemLengthSamples(item, singleItemContinuousLoop);
         state.samplesRemaining = state.itemTotalSamples;
 
         if (item.type == PlaylistItem::ItemType::AudioFile)
@@ -313,7 +321,15 @@ private:
         crossfadeInProgress = false;
     }
 
-    double computeItemLengthSamples(const PlaylistItem& item)
+    bool shouldUseContinuousSingleItemLoop(const PlaylistItem& item) const
+    {
+        // A single-item playlist should loop seamlessly forever unless a target duration is explicitly set.
+        return (playlistItems.size() == 1 &&
+                item.type == PlaylistItem::ItemType::AudioFile &&
+                item.targetDurationSeconds <= 0.0);
+    }
+
+    double computeItemLengthSamples(const PlaylistItem& item, bool singleItemContinuousLoop)
     {
         if (item.type == PlaylistItem::ItemType::Silence)
             return juce::jmax(0.0, item.targetDurationSeconds) * deviceSampleRate;
@@ -329,7 +345,7 @@ private:
             if (reader != nullptr)
             {
                 double fileSeconds = reader->lengthInSamples / reader->sampleRate;
-                if (item.repetitions <= 0)
+                if (item.repetitions <= 0 || singleItemContinuousLoop)
                     lengthSeconds = fileSeconds;
                 else
                     lengthSeconds = fileSeconds * item.repetitions;
@@ -347,16 +363,37 @@ private:
             return;
         }
 
-        juce::AudioSourceChannelInfo info(bufferToFill.buffer,
-                                          bufferToFill.startSample,
-                                          bufferToFill.numSamples);
-        playlistResampler->getNextAudioBlock(info);
+        renderFromResampler(playlistResampler.get(),
+                            *bufferToFill.buffer,
+                            bufferToFill.startSample,
+                            bufferToFill.numSamples);
     }
 
     void renderPlaylistBlock(const juce::AudioSourceChannelInfo& bufferToFill)
     {
         if (bufferToFill.buffer == nullptr || bufferToFill.numSamples <= 0)
             return;
+
+        // Fast path for the common case: one audio item should loop forever seamlessly.
+        // This avoids state-machine edge cases where a single short clip can drop out.
+        if (playlistItems.size() == 1 &&
+            playlistItems.front().type == PlaylistItem::ItemType::AudioFile)
+        {
+            if (playlistResampler == nullptr)
+            {
+                if (!advanceToNextPlaylistItem())
+                {
+                    bufferToFill.buffer->clear(bufferToFill.startSample, bufferToFill.numSamples);
+                    return;
+                }
+            }
+
+            renderFromResampler(playlistResampler.get(),
+                                *bufferToFill.buffer,
+                                bufferToFill.startSample,
+                                bufferToFill.numSamples);
+            return;
+        }
 
         int samplesRemaining = bufferToFill.numSamples;
         int destPos = bufferToFill.startSample;
@@ -381,8 +418,10 @@ private:
 
             if (isAudio)
             {
-                juce::AudioSourceChannelInfo chunkInfo(outBuffer, destPos, samplesFromItem);
-                playlistResampler->getNextAudioBlock(chunkInfo);
+                renderFromResampler(playlistResampler.get(),
+                                    *outBuffer,
+                                    destPos,
+                                    samplesFromItem);
             }
             else
             {
@@ -434,11 +473,13 @@ private:
                                                      fadeOutEnd);
                         }
 
-                        juce::AudioSourceChannelInfo fadeInfo(&crossfadeBuffer, 0, fadeSamples);
                         if (playlistItems[upcomingState.itemIndex].type == PlaylistItem::ItemType::AudioFile &&
                             upcomingResampler != nullptr)
                         {
-                            upcomingResampler->getNextAudioBlock(fadeInfo);
+                            renderFromResampler(upcomingResampler.get(),
+                                                crossfadeBuffer,
+                                                0,
+                                                fadeSamples);
                         }
                         else
                         {
@@ -485,6 +526,29 @@ private:
             crossfadeBuffer.setSize(channels, samples, false, true, true);
     }
 
+    void renderFromResampler(juce::ResamplingAudioSource* resampler,
+                             juce::AudioBuffer<float>& outputBuffer,
+                             int startSample,
+                             int numSamples)
+    {
+        if (resampler == nullptr || numSamples <= 0)
+            return;
+
+        // JUCE's looping reader source does not reliably fill >1 full wrap in a single request.
+        // Pull in smaller chunks so short files can loop seamlessly in long offline render blocks.
+        int samplesRemaining = numSamples;
+        int outputPos = startSample;
+
+        while (samplesRemaining > 0)
+        {
+            const int block = juce::jmin(samplesRemaining, maxReaderRequestSamples);
+            juce::AudioSourceChannelInfo info(&outputBuffer, outputPos, block);
+            resampler->getNextAudioBlock(info);
+            outputPos += block;
+            samplesRemaining -= block;
+        }
+    }
+
     void applyFadeOut(juce::AudioBuffer<float>& buffer, int startSample, int numSamples)
     {
         if (numSamples <= 0)
@@ -504,6 +568,7 @@ private:
     }
 
     juce::AudioFormatManager formatManager;
+    static constexpr int maxReaderRequestSamples = 4096;
 
     bool playlistMode{ false };
     bool isPlaying{ false };

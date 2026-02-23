@@ -5,6 +5,7 @@
 #include "../audio/NoiseAudioSource.h"
 #include "RenderTypes.h"
 #include "RenderManagerCore.h"
+#include <vector>
 
 /**
  * Compatibility class that forwards calls to the new modular system.
@@ -20,11 +21,13 @@ public:
     
     /**
      * Creates a new RenderManager.
-     * @param audioSource The binaural audio source to render from
-     * @param filePlayer The file audio source to render from (optional)
-     * @param noiseSource The noise audio source to render from (optional)
+     * @param binauralSources Binaural audio sources to render from
+     * @param filePlayers File audio sources to render from
+     * @param noiseSources Noise audio sources to render from
      */
-    RenderManager(BinauralAudioSource* binauralSource, FilePlayerAudioSource* filePlayer = nullptr, NoiseAudioSource* noiseSource = nullptr);
+    RenderManager(const std::vector<BinauralAudioSource*>& binauralSources,
+                  const std::vector<FilePlayerAudioSource*>& filePlayers,
+                  const std::vector<NoiseAudioSource*>& noiseSources);
     
     ~RenderManager();
     

@@ -6,6 +6,7 @@
 
 #include "MainComponent.h"
 #include "../utils/RenderManager.h"
+#include "../utils/LastDirectories.h"
 #include "../streaming/YoutubeStreamer.h"
 #include "RenderDialog.h"
 
@@ -37,23 +38,11 @@ namespace
 
 MainComponent::MainComponent()
 {
-    // Initialize audio sources for local playback
-    binauralSource = std::make_unique<BinauralAudioSource>();
-    filePlayer = std::make_unique<FilePlayerAudioSource>();
-    noiseSource = std::make_unique<NoiseAudioSource>();
-
-    // Separate audio sources for streaming (always active)
-    streamingBinauralSource = std::make_unique<BinauralAudioSource>();
-    streamingFilePlayer = std::make_unique<FilePlayerAudioSource>();
-    streamingNoiseSource = std::make_unique<NoiseAudioSource>();
-
-    // Start silent
-    binauralSource->setGain(0.0f);
-    noiseSource->setMuted(true);
-
-    // Connect sources to UI
-    audioPanel.setSources(binauralSource.get(), filePlayer.get(), noiseSource.get(),
-                          streamingBinauralSource.get(), streamingFilePlayer.get(), streamingNoiseSource.get());
+    audioPanel.onTracksChanged = [this]()
+    {
+        const juce::ScopedLock lock(audioGraphLock);
+        rebuildAudioMixers();
+    };
 
     // Section labels
     juce::Font sectionFont;
@@ -111,12 +100,16 @@ MainComponent::MainComponent()
     // Configure and style render button
     renderButton.setColour(juce::TextButton::buttonColourId, juce::Colour(70, 70, 70)); // Dark gray
     renderButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    addTrackButton.setColour(juce::TextButton::buttonColourId, juce::Colour(70, 70, 70));
+    addTrackButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     
-    // Configure save/load buttons
+    // Configure save/load/clear buttons
     saveButton.setColour(juce::TextButton::buttonColourId, juce::Colour(60, 60, 60)); // Dark gray
     saveButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     loadButton.setColour(juce::TextButton::buttonColourId, juce::Colour(60, 60, 60)); // Dark gray
     loadButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    clearButton.setColour(juce::TextButton::buttonColourId, juce::Colour(60, 60, 60)); // Dark gray
+    clearButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     
     // Configure progress area
     progressMessages.setMultiLine(true);
@@ -255,6 +248,7 @@ MainComponent::MainComponent()
 
     addAndMakeVisible(videoSectionLabel);
     addAndMakeVisible(audioSectionLabel);
+    addAndMakeVisible(addTrackButton);
     addAndMakeVisible(audioPanel);
     addAndMakeVisible(videoPanel);
     addAndMakeVisible(appLogoComponent);
@@ -262,6 +256,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(presetsLabel);
     addAndMakeVisible(saveButton);
     addAndMakeVisible(loadButton);
+    addAndMakeVisible(clearButton);
     addAndMakeVisible(playPauseButton);
     addAndMakeVisible(stopButton);
     addAndMakeVisible(outputLabel);
@@ -290,9 +285,6 @@ MainComponent::MainComponent()
     
     addAndMakeVisible(progressMessages);
     addAndMakeVisible(masterMeter);
-    addAndMakeVisible(binauralMeter);
-    addAndMakeVisible(fileMeter);
-    addAndMakeVisible(noiseMeter);
     
     // Stream health monitoring (initially hidden)
     addAndMakeVisible(healthBackgroundPanel);
@@ -314,9 +306,11 @@ MainComponent::MainComponent()
     
     // Add button listeners
     renderButton.addListener(this);
+    addTrackButton.addListener(this);
     streamButton.addListener(this);
     saveButton.addListener(this);
     loadButton.addListener(this);
+    clearButton.addListener(this);
     playPauseButton.addListener(this);
     stopButton.addListener(this);
     
@@ -357,9 +351,6 @@ MainComponent::MainComponent()
     startTimer(50);
     stopButton.setEnabled(false);
 
-    if (binauralSource)
-        binauralSource->setGain(0.0f);
-
     setAudioChannels(0, 2);
     setSize(1200, 800);
 
@@ -369,24 +360,36 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    juce::Logger::writeToLog("~MainComponent: Starting destructor");
+
     if (streamer)
     {
+        juce::Logger::writeToLog("~MainComponent: Stopping streamer...");
         streamer->stopStreaming();
-        juce::Thread::sleep(1000);
         streamer.reset();
+        juce::Logger::writeToLog("~MainComponent: Streamer stopped");
     }
 
     if (renderingThread != nullptr)
+    {
+        juce::Logger::writeToLog("~MainComponent: Stopping renderingThread...");
         renderingThread->stopThread(2000);
+        juce::Logger::writeToLog("~MainComponent: renderingThread stopped");
+    }
 
-    if (binauralSource)
-        binauralSource->setGain(0.0f);
-    if (filePlayer)
-        filePlayer->stop();
+    stopLocalFileTracks();
 
+    juce::Logger::writeToLog("~MainComponent: Stopping timer...");
     stopTimer();
+    juce::Logger::writeToLog("~MainComponent: Shutting down audio...");
     shutdownAudio();
-    mixer.removeAllInputs();
+    juce::Logger::writeToLog("~MainComponent: Removing mixer inputs...");
+    {
+        const juce::ScopedLock lock(audioGraphLock);
+        mixer.removeAllInputs();
+        streamingMixer.removeAllInputs();
+    }
+    juce::Logger::writeToLog("~MainComponent: Destructor complete, member destructors will run next");
 }
 
 void MainComponent::paint(juce::Graphics& g)
@@ -484,31 +487,40 @@ void MainComponent::paint(juce::Graphics& g)
 
 void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
+    const juce::ScopedLock lock(audioGraphLock);
+
     mixer.prepareToPlay(samplesPerBlockExpected, sampleRate);
     streamingMixer.prepareToPlay(samplesPerBlockExpected, sampleRate);
+    rebuildAudioMixers();
 
-    streamingMixer.addInputSource(streamingBinauralSource.get(), false);
-    streamingMixer.addInputSource(streamingFilePlayer.get(), false);
-    streamingMixer.addInputSource(streamingNoiseSource.get(), false);
-
-    if (streamingBinauralSource)
-        streamingBinauralSource->setGain(0.0f);
-
-    if (streamingNoiseSource)
-    {
-        streamingNoiseSource->setMuted(true);
-        streamingNoiseSource->setGain(0.0f);
-    }
-
-    if (streamingFilePlayer)
-        streamingFilePlayer->start();
+    if (streamer)
+        streamer->setAudioFormat(sampleRate, samplesPerBlockExpected);
 
     updateStreamingAudioSettings();
 }
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    mixer.getNextAudioBlock(bufferToFill);
+    juce::AudioBuffer<float> streamBuffer;
+    bool shouldSendStreamAudio = false;
+
+    {
+        const juce::ScopedLock lock(audioGraphLock);
+        mixer.getNextAudioBlock(bufferToFill);
+
+        if (isStreaming && streamer && bufferToFill.buffer && bufferToFill.numSamples > 0)
+        {
+            const int streamChannels = juce::jmax(2, bufferToFill.buffer->getNumChannels());
+            streamBuffer.setSize(streamChannels,
+                                 bufferToFill.numSamples,
+                                 false,
+                                 false,
+                                 true);
+            juce::AudioSourceChannelInfo streamInfo(&streamBuffer, 0, bufferToFill.numSamples);
+            streamingMixer.getNextAudioBlock(streamInfo);
+            shouldSendStreamAudio = true;
+        }
+    }
 
     if (bufferToFill.buffer && bufferToFill.numSamples > 0)
         applyLimiterToBuffer(*bufferToFill.buffer, bufferToFill.startSample, bufferToFill.numSamples);
@@ -528,20 +540,10 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     }
 
     masterMeter.setLevels(leftLevel, rightLevel);
+    audioPanel.updateTrackMeters(leftLevel, rightLevel);
 
-    if (binauralSource && filePlayer && noiseSource)
+    if (shouldSendStreamAudio && streamer)
     {
-        binauralMeter.setLevel(binauralSource->getGain() * leftLevel);
-        fileMeter.setLevel(filePlayer->getGain() * rightLevel);
-        noiseMeter.setLevel(noiseSource->getGain() * leftLevel);
-    }
-
-    if (isStreaming && streamer)
-    {
-        juce::AudioBuffer<float> streamBuffer(bufferToFill.buffer->getNumChannels(), bufferToFill.numSamples);
-        juce::AudioSourceChannelInfo streamInfo(&streamBuffer, 0, bufferToFill.numSamples);
-
-        streamingMixer.getNextAudioBlock(streamInfo);
         if (streamBuffer.getNumSamples() > 0)
             applyLimiterToBuffer(streamBuffer, 0, streamBuffer.getNumSamples());
 
@@ -555,6 +557,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
 
 void MainComponent::releaseResources()
 {
+    const juce::ScopedLock lock(audioGraphLock);
     mixer.releaseResources();
     streamingMixer.releaseResources();
 }
@@ -572,6 +575,14 @@ void MainComponent::buttonClicked(juce::Button* button)
     else if (button == &loadButton)
     {
         loadProject();
+    }
+    else if (button == &clearButton)
+    {
+        clearProject();
+    }
+    else if (button == &addTrackButton)
+    {
+        audioPanel.openAddTrackMenu();
     }
     else if (button == &playPauseButton)
     {
@@ -654,15 +665,21 @@ void MainComponent::resized()
     
     auto rightEdge = toolbarArea.getRight() - 8;
     
+    // CLEAR button (far right with extra space before other buttons)
+    clearButton.setBounds(rightEdge - buttonWidth,
+                        toolbarArea.getCentreY() - buttonHeight/2,
+                        buttonWidth, buttonHeight);
+    rightEdge -= (buttonWidth + buttonSpacing * 4);  // Extra space to separate from Save/Load
+
     // LOAD button
-    loadButton.setBounds(rightEdge - buttonWidth, 
-                         toolbarArea.getCentreY() - buttonHeight/2, 
+    loadButton.setBounds(rightEdge - buttonWidth,
+                         toolbarArea.getCentreY() - buttonHeight/2,
                          buttonWidth, buttonHeight);
     rightEdge -= (buttonWidth + buttonSpacing);
-    
+
     // SAVE button
-    saveButton.setBounds(rightEdge - buttonWidth, 
-                        toolbarArea.getCentreY() - buttonHeight/2, 
+    saveButton.setBounds(rightEdge - buttonWidth,
+                        toolbarArea.getCentreY() - buttonHeight/2,
                         buttonWidth, buttonHeight);
     rightEdge -= (buttonWidth + buttonSpacing);
     
@@ -685,7 +702,8 @@ void MainComponent::resized()
     auto audioArea = r.removeFromTop(audioHeight);
     
     headerHeight = juce::jmin(24, (int)(audioHeight / 10)); // Scale header
-    audioSectionLabel.setBounds(audioArea.getX() + 8, audioArea.getY() + 4, 100, headerHeight);
+    audioSectionLabel.setBounds(audioArea.getX() + 8, audioArea.getY() + 4, 90, headerHeight);
+    addTrackButton.setBounds(audioSectionLabel.getRight() + 8, audioArea.getY() + 3, 90, headerHeight + 1);
     
     // Master meter - increase width and ensure visibility
     int meterWidth = juce::jmax(80, juce::jmin(120, (int)(audioArea.getWidth() / 15))); // Increased minimum from 40 to 80
@@ -705,22 +723,6 @@ void MainComponent::resized()
     // Audio panel gets remaining space
     auto audioContentArea = audioArea.reduced(8).withTrimmedTop(headerHeight + 4);
     audioPanel.setBounds(audioContentArea);
-    
-    // Position external meters to the right of each track
-    auto binauralMeterBounds = audioPanel.getBinauralMeterBounds();
-    auto fileMeterBounds = audioPanel.getFileMeterBounds();
-    auto noiseMeterBounds = audioPanel.getNoiseMeterBounds();
-    
-    // Convert to MainComponent coordinates
-    auto audioPanelPos = audioPanel.getPosition();
-    binauralMeterBounds = binauralMeterBounds.translated(audioPanelPos.getX(), audioPanelPos.getY());
-    fileMeterBounds = fileMeterBounds.translated(audioPanelPos.getX(), audioPanelPos.getY());
-    noiseMeterBounds = noiseMeterBounds.translated(audioPanelPos.getX(), audioPanelPos.getY());
-    
-    // Position meters same height as track cards
-    binauralMeter.setBounds(binauralMeterBounds);
-    fileMeter.setBounds(fileMeterBounds);
-    noiseMeter.setBounds(noiseMeterBounds);
     
     
     // Output section
@@ -898,22 +900,84 @@ void MainComponent::resized()
     progressMessages.setCaretVisible(false);
 }
 
+void MainComponent::rebuildStreamingMixerInputs()
+{
+    streamingMixer.removeAllInputs();
+
+    auto streamingSources = audioPanel.getStreamingAudioSources();
+    for (auto* source : streamingSources)
+    {
+        if (source != nullptr)
+            streamingMixer.addInputSource(source, false);
+    }
+}
+
+void MainComponent::rebuildLocalMixerInputs()
+{
+    mixer.removeAllInputs();
+
+    if (transportState != Playing && transportState != Starting && transportState != Paused)
+        return;
+
+    auto localSources = audioPanel.getLocalAudioSources();
+    for (auto* source : localSources)
+    {
+        if (source != nullptr)
+            mixer.addInputSource(source, false);
+    }
+}
+
+void MainComponent::rebuildAudioMixers()
+{
+    rebuildStreamingMixerInputs();
+    rebuildLocalMixerInputs();
+
+    if (transportState == Playing || transportState == Starting || transportState == Paused)
+        startLocalFileTracks();
+
+    updateStreamingAudioSettings();
+}
+
+void MainComponent::startLocalFileTracks()
+{
+    auto localFileTracks = audioPanel.getFileSources(false);
+    for (auto* fileSource : localFileTracks)
+    {
+        if (fileSource != nullptr)
+            fileSource->start();
+    }
+}
+
+void MainComponent::stopLocalFileTracks()
+{
+    auto localFileTracks = audioPanel.getFileSources(false);
+    for (auto* fileSource : localFileTracks)
+    {
+        if (fileSource != nullptr)
+            fileSource->stop();
+    }
+}
+
+void MainComponent::resetLocalFileTrackPositions(double positionSeconds)
+{
+    auto localFileTracks = audioPanel.getFileSources(false);
+    for (auto* fileSource : localFileTracks)
+    {
+        if (fileSource != nullptr)
+            fileSource->setPosition(positionSeconds);
+    }
+}
+
 void MainComponent::updateTransportState()
 {
     switch (transportState)
     {
         case Starting:
-            mixer.addInputSource(binauralSource.get(), false);
-            mixer.addInputSource(filePlayer.get(), false);
-            mixer.addInputSource(noiseSource.get(), false);
-
-            if (filePlayer)
-                filePlayer->start();
-
-            if (binauralSource && !audioPanel.getBinauralTrack()->isMuted())
-                if (auto* binauralTrack = dynamic_cast<BinauralTrackComponent*>(audioPanel.getBinauralTrack()))
-                    if (!binauralTrack->isMuted())
-                        binauralSource->setGain(binauralTrack->getGain());
+            {
+                const juce::ScopedLock lock(audioGraphLock);
+                rebuildAudioMixers();
+                startLocalFileTracks();
+            }
 
             transportState = Playing;
             stopButton.setEnabled(true);
@@ -930,13 +994,11 @@ void MainComponent::updateTransportState()
             break;
 
         case Stopping:
-            if (filePlayer)
-                filePlayer->stop();
-
-            if (binauralSource)
-                binauralSource->setGain(0.0f);
-
-            mixer.removeAllInputs();
+            {
+                const juce::ScopedLock lock(audioGraphLock);
+                stopLocalFileTracks();
+                mixer.removeAllInputs();
+            }
             transportState = Stopped;
             stopButton.setEnabled(false);
             break;
@@ -950,17 +1012,19 @@ void MainComponent::saveProject()
 {
     // Create a file chooser and keep it alive
     saveProjectChooser.reset(new juce::FileChooser("Save Project",
-                             juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                             LastDirectories::getInstance().getLastDirectory(LastDirectories::Project),
                              "*.ambient"));
-    
+
     // Use async method and keep object alive with class member
-    saveProjectChooser->launchAsync(juce::FileBrowserComponent::saveMode | 
+    saveProjectChooser->launchAsync(juce::FileBrowserComponent::saveMode |
                           juce::FileBrowserComponent::canSelectFiles,
                           [this](const juce::FileChooser& chooser)
     {
         juce::File file = chooser.getResult();
         if (file != juce::File{})
         {
+            LastDirectories::getInstance().rememberFile(LastDirectories::Project, file);
+
             juce::ValueTree project("AmbientProject");
             
             // Add project properties - separate hour, minute, second values
@@ -978,40 +1042,32 @@ void MainComponent::saveProject()
             project.setProperty("fadeIn", fadeInEditor.getText(), nullptr);
             project.setProperty("fadeOut", fadeOutEditor.getText(), nullptr);
             
-            // Save all audio settings from the UI
-            auto* binauralTrack = dynamic_cast<BinauralTrackComponent*>(audioPanel.getBinauralTrack());
-            auto* fileTrack = dynamic_cast<FileTrackComponent*>(audioPanel.getFileTrack());
-            auto* noiseTrack = dynamic_cast<NoiseTrackComponent*>(audioPanel.getNoiseTrack());
-            
             juce::ValueTree audioSettings("AudioSettings");
-            
-            if (binauralTrack)
-            {
-                juce::ValueTree binauralData("BinauralTrack");
-                binauralData.setProperty("leftFrequency", binauralTrack->getLeftFrequency(), nullptr);
-                binauralData.setProperty("rightFrequency", binauralTrack->getRightFrequency(), nullptr);
-                binauralData.setProperty("gainValue", (float)binauralTrack->getGain(), nullptr);
-                binauralData.setProperty("muted", (bool)binauralTrack->isMuted(), nullptr);
-                binauralData.setProperty("solo", (bool)binauralTrack->isSolo(), nullptr);
-                // binauralData.setProperty("autoPlay", binauralTrack->shouldAutoPlay(), nullptr);
-                audioSettings.addChild(binauralData, -1, nullptr);
-            }
-            
-            // Save audio file track settings
-            if (fileTrack)
-            {
-                juce::ValueTree fileData("FileTrack");
-                fileData.setProperty("gainValue", (float)fileTrack->getGain(), nullptr);
-                fileData.setProperty("muted", (bool)fileTrack->isMuted(), nullptr);
-                fileData.setProperty("solo", (bool)fileTrack->isSolo(), nullptr);
+            juce::ValueTree tracksTree("Tracks");
+            auto snapshots = audioPanel.createSnapshots();
 
-                juce::ValueTree playlistTree("Playlist");
-                auto playlistItems = fileTrack->getPlaylistItems();
-                if (!playlistItems.empty())
+            for (const auto& snapshot : snapshots)
+            {
+                juce::ValueTree trackNode("Track");
+                trackNode.setProperty("type", AudioPanel::trackTypeToString(snapshot.type), nullptr);
+                trackNode.setProperty("laneWidth", snapshot.laneWidth, nullptr);
+                trackNode.setProperty("gainValue", snapshot.gainValue, nullptr);
+                trackNode.setProperty("muted", snapshot.muted, nullptr);
+                trackNode.setProperty("solo", snapshot.solo, nullptr);
+
+                if (snapshot.type == AudioPanel::TrackType::Binaural)
                 {
-                    fileData.setProperty("filePath", playlistItems.front().file.getFullPathName(), nullptr);
-
-                    for (const auto& item : playlistItems)
+                    trackNode.setProperty("leftFrequency", snapshot.leftFrequency, nullptr);
+                    trackNode.setProperty("rightFrequency", snapshot.rightFrequency, nullptr);
+                }
+                else if (snapshot.type == AudioPanel::TrackType::Noise)
+                {
+                    trackNode.setProperty("noiseType", snapshot.noiseType, nullptr);
+                }
+                else if (snapshot.type == AudioPanel::TrackType::File)
+                {
+                    juce::ValueTree playlistTree("Playlist");
+                    for (const auto& item : snapshot.playlistItems)
                     {
                         juce::ValueTree entry("Item");
                         entry.setProperty("type", item.type == FilePlayerAudioSource::PlaylistItem::ItemType::AudioFile ? "audio" : "silence", nullptr);
@@ -1022,27 +1078,13 @@ void MainComponent::saveProject()
                         entry.setProperty("crossfade", item.crossfadeSeconds, nullptr);
                         playlistTree.addChild(entry, -1, nullptr);
                     }
-                    fileData.addChild(playlistTree, -1, nullptr);
-                }
-                else
-                {
-                    fileData.setProperty("filePath", fileTrack->getLoadedFilePath(), nullptr);
+                    trackNode.addChild(playlistTree, -1, nullptr);
                 }
 
-                audioSettings.addChild(fileData, -1, nullptr);
+                tracksTree.addChild(trackNode, -1, nullptr);
             }
-            
-            // Save noise track settings
-            if (noiseTrack)
-            {
-                juce::ValueTree noiseData("NoiseTrack");
-                noiseData.setProperty("noiseType", (int)audioPanel.getNoiseSource()->getNoiseType(), nullptr);
-                noiseData.setProperty("gainValue", (float)noiseTrack->getGain(), nullptr);
-                noiseData.setProperty("muted", (bool)noiseTrack->isMuted(), nullptr);
-                noiseData.setProperty("solo", (bool)noiseTrack->isSolo(), nullptr);
-                audioSettings.addChild(noiseData, -1, nullptr);
-            }
-            
+
+            audioSettings.addChild(tracksTree, -1, nullptr);
             project.addChild(audioSettings, -1, nullptr);
             
             // Save video clips
@@ -1109,17 +1151,18 @@ void MainComponent::loadProject()
 {
     // Create a file chooser and keep it alive
     loadProjectChooser.reset(new juce::FileChooser("Load Project",
-                             juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                             LastDirectories::getInstance().getLastDirectory(LastDirectories::Project),
                              "*.ambient"));
-    
+
     // Use async method and keep object alive with class member
-    loadProjectChooser->launchAsync(juce::FileBrowserComponent::openMode | 
+    loadProjectChooser->launchAsync(juce::FileBrowserComponent::openMode |
                           juce::FileBrowserComponent::canSelectFiles,
                           [this](const juce::FileChooser& chooser)
     {
         juce::File file = chooser.getResult();
         if (file.existsAsFile())
         {
+            LastDirectories::getInstance().rememberFile(LastDirectories::Project, file);
             // Log file loading attempt
             progressMessages.moveCaretToEnd();
             progressMessages.insertTextAtCaret("Attempting to load project from: " + file.getFullPathName() + "\n");
@@ -1167,14 +1210,13 @@ void MainComponent::loadProject()
                     videoPanel.clearAllClips();
                     
                     // Stop any playing audio to avoid crashes when loading new audio
-                    if (filePlayer)
-                        filePlayer->stop();
-                    
-                    // Always stop binaural audio when loading a project
-                    if (binauralSource)
-                        binauralSource->setGain(0.0f);
+                    stopLocalFileTracks();
                         
                     transportState = Stopped;
+                    {
+                        const juce::ScopedLock lock(audioGraphLock);
+                        mixer.removeAllInputs();
+                    }
                     // Keep play button (it shows play icon)
                     stopButton.setEnabled(false);
                     
@@ -1223,160 +1265,180 @@ void MainComponent::loadProject()
                     
                     // Load audio settings
                     juce::ValueTree audioSettings = project.getChildWithName("AudioSettings");
+                    bool loadedTrackList = false;
+
                     if (audioSettings.isValid())
                     {
-                        // Load binaural track settings
-                        juce::ValueTree binauralData = audioSettings.getChildWithName("BinauralTrack");
-                        if (binauralData.isValid())
+                        auto tracksTree = audioSettings.getChildWithName("Tracks");
+                        if (tracksTree.isValid() && tracksTree.getNumChildren() > 0)
                         {
-                            auto* binauralTrack = dynamic_cast<BinauralTrackComponent*>(audioPanel.getBinauralTrack());
-                            if (binauralTrack)
+                            juce::Array<AudioPanel::TrackSnapshot> snapshots;
+                            for (int i = 0; i < tracksTree.getNumChildren(); ++i)
                             {
-                                if (binauralData.hasProperty("leftFrequency"))
-                                    binauralTrack->setLeftFrequency(binauralData.getProperty("leftFrequency"));
-                                
-                                if (binauralData.hasProperty("rightFrequency"))
-                                    binauralTrack->setRightFrequency(binauralData.getProperty("rightFrequency"));
-                                
-                                if (binauralData.hasProperty("gainValue"))
-                                    binauralTrack->setGain((float)binauralData.getProperty("gainValue"));
-                                
-                                if (binauralData.hasProperty("muted"))
-                                    binauralTrack->setMuteState((bool)binauralData.getProperty("muted"));
-                                
-                                if (binauralData.hasProperty("solo"))
-                                    binauralTrack->setSoloState((bool)binauralData.getProperty("solo"));
-                                
-                                // if (binauralData.hasProperty("autoPlay"))
-                                //     binauralTrack->setShouldAutoPlay((bool)binauralData.getProperty("autoPlay"));
-                            }
-                        }
-                        
-                        // Load file track settings
-                        juce::ValueTree fileData = audioSettings.getChildWithName("FileTrack");
-                        if (fileData.isValid())
-                        {
-                            auto* fileTrack = dynamic_cast<FileTrackComponent*>(audioPanel.getFileTrack());
-                            if (fileTrack)
-                            {
-                                std::vector<FilePlayerAudioSource::PlaylistItem> playlistItems;
-                                juce::ValueTree playlistTree = fileData.getChildWithName("Playlist");
-                                if (playlistTree.isValid())
+                                auto trackNode = tracksTree.getChild(i);
+                                if (!trackNode.hasType("Track"))
+                                    continue;
+
+                                AudioPanel::TrackSnapshot snapshot;
+                                snapshot.type = AudioPanel::trackTypeFromString(trackNode.getProperty("type").toString(),
+                                                                                AudioPanel::TrackType::File);
+                                const auto laneWidthVar = trackNode.hasProperty("laneWidth")
+                                                          ? trackNode.getProperty("laneWidth")
+                                                          : trackNode.getProperty("laneHeight", 320);
+                                snapshot.laneWidth = static_cast<int>(laneWidthVar);
+                                snapshot.gainValue = static_cast<float>(trackNode.getProperty("gainValue", 0.833f));
+                                snapshot.muted = static_cast<bool>(trackNode.getProperty("muted", false));
+                                snapshot.solo = static_cast<bool>(trackNode.getProperty("solo", false));
+                                snapshot.leftFrequency = static_cast<double>(trackNode.getProperty("leftFrequency", 70.0));
+                                snapshot.rightFrequency = static_cast<double>(trackNode.getProperty("rightFrequency", 74.0));
+                                snapshot.noiseType = static_cast<int>(trackNode.getProperty("noiseType", static_cast<int>(NoiseAudioSource::White)));
+
+                                if (snapshot.type == AudioPanel::TrackType::File)
                                 {
-                                    for (int i = 0; i < playlistTree.getNumChildren(); ++i)
+                                    auto playlistTree = trackNode.getChildWithName("Playlist");
+                                    for (int p = 0; p < playlistTree.getNumChildren(); ++p)
                                     {
-                                        auto entry = playlistTree.getChild(i);
+                                        auto entry = playlistTree.getChild(p);
+                                        const juce::String entryType = entry.getProperty("type").toString();
                                         FilePlayerAudioSource::PlaylistItem item;
-                                        juce::String type = entry.getProperty("type").toString();
-                                        if (type == "silence")
+
+                                        if (entryType == "silence")
                                         {
                                             item = FilePlayerAudioSource::PlaylistItem::createSilence(
-                                                (double)entry.getProperty("targetDuration"),
-                                                (double)entry.getProperty("crossfade"));
+                                                static_cast<double>(entry.getProperty("targetDuration", 0.0)),
+                                                static_cast<double>(entry.getProperty("crossfade", 0.0)),
+                                                entry.getProperty("displayName", "Silence").toString());
                                         }
                                         else
                                         {
                                             juce::File audioFile(entry.getProperty("filePath").toString());
                                             item = FilePlayerAudioSource::PlaylistItem::createAudio(
                                                 audioFile,
-                                                (int)entry.getProperty("repetitions"),
-                                                (double)entry.getProperty("targetDuration"),
-                                                (double)entry.getProperty("crossfade"),
+                                                static_cast<int>(entry.getProperty("repetitions", 1)),
+                                                static_cast<double>(entry.getProperty("targetDuration", 0.0)),
+                                                static_cast<double>(entry.getProperty("crossfade", 0.0)),
                                                 entry.getProperty("displayName").toString());
                                         }
-                                        playlistItems.push_back(item);
+
+                                        snapshot.playlistItems.push_back(item);
                                     }
-                                    fileTrack->setPlaylistItems(playlistItems);
+                                }
+
+                                snapshots.add(snapshot);
+                            }
+
+                            audioPanel.loadFromSnapshots(snapshots, true);
+                            loadedTrackList = true;
+                        }
+                    }
+
+                    if (!loadedTrackList)
+                    {
+                        // Backward compatibility with legacy single-track schema
+                        audioPanel.createDefaultTracks();
+
+                        auto binauralTracks = audioPanel.getBinauralTracks();
+                        auto fileTracks = audioPanel.getFileTracks();
+                        auto noiseTracks = audioPanel.getNoiseTracks();
+
+                        auto* legacyBinaural = binauralTracks.empty() ? nullptr : binauralTracks.front();
+                        auto* legacyFile = fileTracks.empty() ? nullptr : fileTracks.front();
+                        auto* legacyNoise = noiseTracks.empty() ? nullptr : noiseTracks.front();
+
+                        if (audioSettings.isValid())
+                        {
+                            juce::ValueTree binauralData = audioSettings.getChildWithName("BinauralTrack");
+                            if (legacyBinaural && binauralData.isValid())
+                            {
+                                if (binauralData.hasProperty("leftFrequency"))
+                                    legacyBinaural->setLeftFrequency(binauralData.getProperty("leftFrequency"));
+                                if (binauralData.hasProperty("rightFrequency"))
+                                    legacyBinaural->setRightFrequency(binauralData.getProperty("rightFrequency"));
+                                if (binauralData.hasProperty("gainValue"))
+                                    legacyBinaural->setGain(static_cast<float>(binauralData.getProperty("gainValue")));
+                                if (binauralData.hasProperty("muted"))
+                                    legacyBinaural->setMuteState(static_cast<bool>(binauralData.getProperty("muted")));
+                                if (binauralData.hasProperty("solo"))
+                                    legacyBinaural->setSoloState(static_cast<bool>(binauralData.getProperty("solo")));
+                            }
+
+                            juce::ValueTree fileData = audioSettings.getChildWithName("FileTrack");
+                            if (legacyFile && fileData.isValid())
+                            {
+                                std::vector<FilePlayerAudioSource::PlaylistItem> playlistItems;
+                                auto playlistTree = fileData.getChildWithName("Playlist");
+                                if (playlistTree.isValid())
+                                {
+                                    for (int i = 0; i < playlistTree.getNumChildren(); ++i)
+                                    {
+                                        auto entry = playlistTree.getChild(i);
+                                        const juce::String type = entry.getProperty("type").toString();
+                                        if (type == "silence")
+                                        {
+                                            playlistItems.push_back(FilePlayerAudioSource::PlaylistItem::createSilence(
+                                                static_cast<double>(entry.getProperty("targetDuration", 0.0)),
+                                                static_cast<double>(entry.getProperty("crossfade", 0.0)),
+                                                entry.getProperty("displayName", "Silence").toString()));
+                                        }
+                                        else
+                                        {
+                                            juce::File audioFile(entry.getProperty("filePath").toString());
+                                            playlistItems.push_back(FilePlayerAudioSource::PlaylistItem::createAudio(
+                                                audioFile,
+                                                static_cast<int>(entry.getProperty("repetitions", 1)),
+                                                static_cast<double>(entry.getProperty("targetDuration", 0.0)),
+                                                static_cast<double>(entry.getProperty("crossfade", 0.0)),
+                                                entry.getProperty("displayName").toString()));
+                                        }
+                                    }
+                                    legacyFile->setPlaylistItems(playlistItems);
                                 }
                                 else if (fileData.hasProperty("filePath"))
                                 {
                                     juce::File audioFile(fileData.getProperty("filePath").toString());
                                     if (audioFile.existsAsFile())
-                                    {
-                                        fileTrack->loadAudioFile(audioFile);
-                                    }
-                                    else
-                                    {
-                                        progressMessages.moveCaretToEnd();
-                                        progressMessages.insertTextAtCaret("Warning: Audio file not found: " + audioFile.getFullPathName() + "\n");
-                                    }
+                                        legacyFile->loadAudioFile(audioFile);
                                 }
-                                
+
                                 if (fileData.hasProperty("gainValue"))
-                                    fileTrack->setGain((float)fileData.getProperty("gainValue"));
-                                
+                                    legacyFile->setGain(static_cast<float>(fileData.getProperty("gainValue")));
                                 if (fileData.hasProperty("muted"))
-                                    fileTrack->setMuteState((bool)fileData.getProperty("muted"));
-                                
+                                    legacyFile->setMuteState(static_cast<bool>(fileData.getProperty("muted")));
                                 if (fileData.hasProperty("solo"))
-                                    fileTrack->setSoloState((bool)fileData.getProperty("solo"));
+                                    legacyFile->setSoloState(static_cast<bool>(fileData.getProperty("solo")));
                             }
-                        }
-                        
-                        // Load noise track settings
-                        juce::ValueTree noiseData = audioSettings.getChildWithName("NoiseTrack");
-                        if (noiseData.isValid())
-                        {
-                            auto* noiseTrack = dynamic_cast<NoiseTrackComponent*>(audioPanel.getNoiseTrack());
-                            if (noiseTrack)
+                            else if (legacyFile && audioSettings.hasProperty("filePath"))
+                            {
+                                juce::File audioFile(audioSettings.getProperty("filePath").toString());
+                                if (audioFile.existsAsFile())
+                                    legacyFile->loadAudioFile(audioFile);
+                            }
+
+                            juce::ValueTree noiseData = audioSettings.getChildWithName("NoiseTrack");
+                            if (legacyNoise && noiseData.isValid())
                             {
                                 if (noiseData.hasProperty("noiseType"))
-                                {
-                                    auto noiseType = (NoiseAudioSource::NoiseType)(int)noiseData.getProperty("noiseType");
-                                    noiseTrack->setNoiseType(noiseType);
-                                }
-                                
+                                    legacyNoise->setNoiseType(static_cast<NoiseAudioSource::NoiseType>(static_cast<int>(noiseData.getProperty("noiseType"))));
                                 if (noiseData.hasProperty("gainValue"))
-                                    noiseTrack->setGain((float)noiseData.getProperty("gainValue"));
-                                
+                                    legacyNoise->setGain(static_cast<float>(noiseData.getProperty("gainValue")));
                                 if (noiseData.hasProperty("muted"))
-                                    noiseTrack->setMuteState((bool)noiseData.getProperty("muted"));
-                                
+                                    legacyNoise->setMuteState(static_cast<bool>(noiseData.getProperty("muted")));
                                 if (noiseData.hasProperty("solo"))
-                                    noiseTrack->setSoloState((bool)noiseData.getProperty("solo"));
+                                    legacyNoise->setSoloState(static_cast<bool>(noiseData.getProperty("solo")));
                             }
                         }
-                    }
-                    
-                    // For backwards compatibility
-                    if (!audioSettings.isValid() || (!audioSettings.getChildWithName("BinauralTrack").isValid() && !audioSettings.getChildWithName("FileTrack").isValid()))
-                    {
-                        // Load binaural settings from old format
+
                         juce::ValueTree binauralSettings = project.getChildWithName("BinauralSettings");
-                        if (binauralSettings.isValid())
+                        if (legacyBinaural && binauralSettings.isValid())
                         {
-                            auto* binauralTrack = dynamic_cast<BinauralTrackComponent*>(audioPanel.getBinauralTrack());
-                            if (binauralTrack)
-                            {
-                                if (binauralSettings.hasProperty("leftFrequency"))
-                                    binauralTrack->setLeftFrequency(binauralSettings.getProperty("leftFrequency"));
-                                
-                                if (binauralSettings.hasProperty("rightFrequency"))
-                                    binauralTrack->setRightFrequency(binauralSettings.getProperty("rightFrequency"));
-                            }
-                        }
-                            
-                        // Load audio file from old format
-                        if (audioSettings.isValid() && audioSettings.hasProperty("filePath"))
-                        {
-                            juce::String audioPath = audioSettings.getProperty("filePath").toString();
-                            juce::File audioFile(audioPath);
-                            
-                            if (audioFile.existsAsFile())
-                            {
-                                auto* fileTrack = dynamic_cast<FileTrackComponent*>(audioPanel.getFileTrack());
-                                if (fileTrack)
-                                {
-                                    fileTrack->loadAudioFile(audioFile);
-                                }
-                            }
-                            else
-                            {
-                                progressMessages.moveCaretToEnd();
-                                progressMessages.insertTextAtCaret("Warning: Audio file not found: " + audioPath + "\n");
-                            }
+                            if (binauralSettings.hasProperty("leftFrequency"))
+                                legacyBinaural->setLeftFrequency(binauralSettings.getProperty("leftFrequency"));
+                            if (binauralSettings.hasProperty("rightFrequency"))
+                                legacyBinaural->setRightFrequency(binauralSettings.getProperty("rightFrequency"));
                         }
                     }
+
+                    updateStreamingAudioSettings();
                     
                     // Load video clips
                     juce::ValueTree videoClips = project.getChildWithName("VideoClips");
@@ -1542,6 +1604,26 @@ void MainComponent::loadProject()
     });
 }
 
+void MainComponent::clearProject()
+{
+    // Clear all video clips
+    videoPanel.clearAllClips();
+
+    // Clear all file-track playlists
+    audioPanel.clearAllFileTrackPlaylists();
+
+    // Reset duration to defaults
+    hoursEditor.setText("1", false);
+    minutesEditor.setText("0", false);
+    secondsEditor.setText("0", false);
+
+    // Reset fade times
+    fadeInEditor.setText("3", false);
+    fadeOutEditor.setText("3", false);
+
+    addProgressMessage("Project cleared");
+}
+
 void MainComponent::startRendering()
 {
     if (!isRendering)
@@ -1554,12 +1636,11 @@ void MainComponent::startRendering()
             juce::Thread::sleep(100);
         }
 
-        mixer.removeAllInputs();
-
-        if (filePlayer)
         {
-            filePlayer->stop();
-            filePlayer->setPosition(0.0);
+            const juce::ScopedLock lock(audioGraphLock);
+            mixer.removeAllInputs();
+            stopLocalFileTracks();
+            resetLocalFileTrackPositions(0.0);
         }
 
         // Note: Don't modify binaural gain here - RenderManager reads UI values directly
@@ -1689,12 +1770,19 @@ void MainComponent::startRendering()
             info.startTimeSecs = clipData.startTimeSecs;
             overlayClips.push_back(info);
         }
+
+        // Push latest UI values into the local render sources before building the render dialog.
+        audioPanel.syncLocalSourcesFromUI();
+
+        auto renderBinauralSources = audioPanel.getBinauralSources(false);
+        auto renderFileSources = audioPanel.getFileSources(false);
+        auto renderNoiseSources = audioPanel.getNoiseSources(false);
         
         // Create the render dialog directly
         auto renderDialog = new RenderDialog(
-            binauralSource.get(),
-            filePlayer.get(),
-            noiseSource.get(),
+            renderBinauralSources,
+            renderFileSources,
+            renderNoiseSources,
             introClips,
             loopClips,
             overlayClips,
@@ -1905,59 +1993,13 @@ void MainComponent::addProgressMessage(const juce::String& message)
 
 void MainComponent::updateStreamingAudioSettings()
 {
-    // Sync streaming audio sources with current UI settings
-    if (!streamingBinauralSource || !streamingFilePlayer || !streamingNoiseSource)
-        return;
-    
-    // Safety check: Make sure audio panel components are initialized
-    if (!audioPanel.getBinauralTrack() || !audioPanel.getNoiseTrack())
-    {
-        // Audio panel not ready yet, keep streaming sources muted
-        streamingBinauralSource->setGain(0.0f);
-        streamingNoiseSource->setMuted(true);
-        streamingNoiseSource->setGain(0.0f);
-        return;
-    }
-    
-    // Update streaming binaural source to match current UI settings
-    if (auto* binauralTrack = dynamic_cast<BinauralTrackComponent*>(audioPanel.getBinauralTrack()))
-    {
-        float gain = binauralTrack->isMuted() ? 0.0f : binauralTrack->getActualGain();
-        streamingBinauralSource->setGain(gain);
-        // Use the correct frequency methods
-        streamingBinauralSource->setLeftFrequency(binauralTrack->getLeftFrequency());
-        streamingBinauralSource->setRightFrequency(binauralTrack->getRightFrequency());
-    }
-    
-    // Update streaming noise source to match current UI settings
-    if (auto* noiseTrack = audioPanel.getNoiseTrack())
-    {
-        float gain = noiseTrack->isMuted() ? 0.0f : noiseTrack->getActualGain();
-        streamingNoiseSource->setGain(gain);
-        streamingNoiseSource->setMuted(noiseTrack->isMuted());
-        // Copy noise type if available in your NoiseAudioSource
-    }
-    
-    // Ensure streaming file player gain matches the UI track
-    if (auto* fileTrack = dynamic_cast<FileTrackComponent*>(audioPanel.getFileTrack()))
-    {
-        float gain = fileTrack->isMuted() ? 0.0f : fileTrack->getActualGain();
-        if (streamingFilePlayer)
-            streamingFilePlayer->setGain(gain);
-    }
-    
-    // Update streaming file player to use same file as local playback
-    if (filePlayer && streamingFilePlayer)
-    {
-        juce::File currentFile = filePlayer->getLoadedFile();
-        if (currentFile.existsAsFile())
-        {
-            streamingFilePlayer->loadFile(currentFile);
-            streamingFilePlayer->start();
-        }
-        // else: no valid file loaded, streaming player unchanged
+    audioPanel.syncStreamingFromLocal();
 
-        streamingFilePlayer->setPlaylist(filePlayer->getPlaylist());
+    auto streamingFileTracks = audioPanel.getFileSources(true);
+    for (auto* source : streamingFileTracks)
+    {
+        if (source != nullptr)
+            source->start();
     }
 }
 
@@ -2008,9 +2050,9 @@ void MainComponent::loadDemoClipsIfAvailable()
     auto overlayFile = assetsDir.getChildFile("overlay.mov");
 
     if (introFile.existsAsFile())
-        videoPanel.addIntroClip(introFile, 0.0, 1.0);
+        videoPanel.addIntroClip(introFile, 0.0, 0.0);
     if (loopFile.existsAsFile())
-        videoPanel.addLoopClip(loopFile, 0.0, 1.0);
+        videoPanel.addLoopClip(loopFile, 0.0, 0.0);
     if (overlayFile.existsAsFile())
         videoPanel.addOverlayClip(overlayFile, 0.0, 5.0, 10.0);
 

@@ -10,6 +10,7 @@
 
 #include "VideoPanel.h"
 #include "VideoPreviewComponent.h"
+#include "../../utils/LastDirectories.h"
 #include <cstdlib> // for std::system
 
 // Define our table models
@@ -406,13 +407,26 @@ std::unique_ptr<juce::Image> VideoPanel::createThumbnail(const juce::File& video
     bool success = process.start(ffmpegCmd, 0);
 
     if (success)
-        process.waitForProcessToFinish(5000);
-    
+    {
+        // Wait in small increments so we can respond to thread shutdown
+        for (int i = 0; i < 50 && process.isRunning(); ++i)
+        {
+            juce::Thread::sleep(100);
+            // Check if we should abort (allows quick shutdown)
+            if (juce::Thread::getCurrentThread() != nullptr &&
+                juce::Thread::getCurrentThread()->threadShouldExit())
+            {
+                process.kill();
+                return nullptr;
+            }
+        }
+        // Kill if still running after 5 seconds
+        if (process.isRunning())
+            process.kill();
+    }
+
     // Create the file object after running the command
     juce::File thumbnailFile(thumbnailPath);
-    
-    // Give system time to complete I/O
-    juce::Thread::sleep(100);
     
 #else
     // Unix-based systems
@@ -427,7 +441,19 @@ std::unique_ptr<juce::Image> VideoPanel::createThumbnail(const juce::File& video
     juce::ChildProcess ffProcess;
     if (ffProcess.start(ffmpegCmd))
     {
-        ffProcess.waitForProcessToFinish(5000);
+        // Wait in small increments so we can respond to thread shutdown
+        for (int i = 0; i < 50 && ffProcess.isRunning(); ++i)
+        {
+            juce::Thread::sleep(100);
+            if (juce::Thread::getCurrentThread() != nullptr &&
+                juce::Thread::getCurrentThread()->threadShouldExit())
+            {
+                ffProcess.kill();
+                return nullptr;
+            }
+        }
+        if (ffProcess.isRunning())
+            ffProcess.kill();
     }
 #endif
     
@@ -1124,12 +1150,19 @@ double VideoPanel::getVideoDuration(const juce::File& videoFile)
 
 VideoPanel::~VideoPanel()
 {
+    juce::Logger::writeToLog("~VideoPanel: Starting destructor");
+
     // Stop the timer
     stopTimer();
-    
+    juce::Logger::writeToLog("~VideoPanel: Timer stopped");
+
     // Shut down the thumbnail loader thread
     if (thumbnailLoader)
+    {
+        juce::Logger::writeToLog("~VideoPanel: Stopping thumbnailLoader...");
         thumbnailLoader->stopThread(1000);
+        juce::Logger::writeToLog("~VideoPanel: thumbnailLoader stopped");
+    }
     
     // Close any open preview window
     if (previewWindow != nullptr)
@@ -1313,26 +1346,28 @@ void VideoPanel::buttonClicked(juce::Button* b)
     {
         // Create a file chooser and keep it alive
         introVideoChooser.reset(new juce::FileChooser("Select Intro Video",
-                                  juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                                  LastDirectories::getInstance().getLastDirectory(LastDirectories::Video),
                                   "*.mp4;*.mov;*.avi;*.mkv"));
-        
+
         // Use async method and keep object alive with class member
-        introVideoChooser->launchAsync(juce::FileBrowserComponent::openMode | 
+        introVideoChooser->launchAsync(juce::FileBrowserComponent::openMode |
                              juce::FileBrowserComponent::canSelectFiles,
                              [this](const juce::FileChooser& chooser)
         {
             juce::File file = chooser.getResult();
             if (file.existsAsFile())
             {
+                    LastDirectories::getInstance().rememberFile(LastDirectories::Video, file);
+
                     // Deselect any selection in the other tables first
                     loopTable.deselectAllRows();
                     overlayTable.deselectAllRows();
-                    
+
                     // Set list as active now
                     activeList = IntroList;
-                    
+
                     // Add to intro clips using helper method with duration = 0 to use native duration
-                    addIntroClip(file, 0.0, 1.0);
+                    addIntroClip(file, 0.0, 0.0);
             }
         });
     }
@@ -1340,26 +1375,28 @@ void VideoPanel::buttonClicked(juce::Button* b)
     {
         // Create a file chooser and keep it alive
         loopVideoChooser.reset(new juce::FileChooser("Select Loop Video",
-                                  juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                                  LastDirectories::getInstance().getLastDirectory(LastDirectories::Video),
                                   "*.mp4;*.mov;*.avi;*.mkv"));
-        
+
         // Use async method and keep object alive with class member
-        loopVideoChooser->launchAsync(juce::FileBrowserComponent::openMode | 
+        loopVideoChooser->launchAsync(juce::FileBrowserComponent::openMode |
                              juce::FileBrowserComponent::canSelectFiles,
                              [this](const juce::FileChooser& chooser)
         {
             juce::File file = chooser.getResult();
             if (file.existsAsFile())
             {
+                    LastDirectories::getInstance().rememberFile(LastDirectories::Video, file);
+
                     // Deselect any selection in the other tables first
                     introTable.deselectAllRows();
                     overlayTable.deselectAllRows();
-                    
+
                     // Set list as active now
                     activeList = LoopList;
-                    
+
                     // Add to loop clips using helper method with duration = 0 to use native duration
-                    addLoopClip(file, 0.0, 1.0);
+                    addLoopClip(file, 0.0, 0.0);
             }
         });
     }
@@ -1367,24 +1404,26 @@ void VideoPanel::buttonClicked(juce::Button* b)
     {
         // Create a file chooser and keep it alive - include all common image formats for static overlays
         overlayVideoChooser.reset(new juce::FileChooser("Select Overlay Video or Image",
-                                  juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                                  LastDirectories::getInstance().getLastDirectory(LastDirectories::Video),
                                   "*.mp4;*.mov;*.avi;*.mkv;*.png;*.jpg;*.jpeg;*.bmp;*.gif"));
-        
+
         // Use async method and keep object alive with class member
-        overlayVideoChooser->launchAsync(juce::FileBrowserComponent::openMode | 
+        overlayVideoChooser->launchAsync(juce::FileBrowserComponent::openMode |
                              juce::FileBrowserComponent::canSelectFiles,
                              [this](const juce::FileChooser& chooser)
         {
             juce::File file = chooser.getResult();
             if (file.existsAsFile())
             {
+                    LastDirectories::getInstance().rememberFile(LastDirectories::Video, file);
+
                     // Deselect any selection in the other tables first
                     introTable.deselectAllRows();
                     loopTable.deselectAllRows();
-                    
+
                     // Set list as active now
                     activeList = OverlayList;
-                    
+
                     // Add to overlay clips using helper method
                     // Default frequency: 5 minutes, start time 10 seconds in
                     addOverlayClip(file, 0.0, 5.0, 10.0);

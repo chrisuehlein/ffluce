@@ -107,11 +107,13 @@ namespace
     };
 }
 
-RenderManagerCore::RenderManagerCore(BinauralAudioSource* binauralSource, FilePlayerAudioSource* filePlayer, NoiseAudioSource* noiseSource)
+RenderManagerCore::RenderManagerCore(const std::vector<BinauralAudioSource*>& binauralSources,
+                                     const std::vector<FilePlayerAudioSource*>& filePlayers,
+                                     const std::vector<NoiseAudioSource*>& noiseSources)
     : Thread("RenderManagerCore"),
-      binauralSource(binauralSource),
-      filePlayer(filePlayer),
-      noiseSource(noiseSource),
+      binauralSources(binauralSources),
+      filePlayers(filePlayers),
+      noiseSources(noiseSources),
       state(RenderState::Idle),
       progress(0.0),
       shouldCancel(false),
@@ -123,18 +125,27 @@ RenderManagerCore::RenderManagerCore(BinauralAudioSource* binauralSource, FilePl
     clipProcessor = std::make_unique<ClipProcessor>(ffmpegExecutor.get());
     overlayProcessor = std::make_unique<OverlayProcessor>(ffmpegExecutor.get());
     timelineAssembler = std::make_unique<TimelineAssembler>(ffmpegExecutor.get(), overlayProcessor.get());
-    audioRenderer = std::make_unique<AudioRenderer>(binauralSource, filePlayer, noiseSource);
+    audioRenderer = std::make_unique<AudioRenderer>(binauralSources, filePlayers, noiseSources);
+    audioRenderer->setCancellationFlag(&shouldCancel);
 }
 
 RenderManagerCore::~RenderManagerCore()
 {
-    // Stop any ongoing rendering
-    cancelRendering();
-    
-    // Wait for thread to finish
+    // Stop timer first to prevent callbacks during destruction
+    stopTimer();
+
+    // Signal cancellation and kill FFmpeg first so thread unblocks
+    shouldCancel = true;
+    if (ffmpegExecutor)
+        ffmpegExecutor->cancelCurrentCommand();
+
+    // Now stop the thread - it should exit quickly
     if (isThreadRunning())
-        stopThread(5000);
-    
+    {
+        signalThreadShouldExit();
+        stopThread(3000);
+    }
+
     // Clean up any temp directories
     cleanup();
 }
@@ -396,7 +407,7 @@ void RenderManagerCore::run()
     try
     {
         // Step 1: Render Audio Track
-        if (binauralSource != nullptr || filePlayer != nullptr)
+        if (!binauralSources.empty() || !filePlayers.empty() || !noiseSources.empty())
         {
             updateState(RenderState::RenderingAudio, "Rendering audio track...");
             
@@ -404,12 +415,7 @@ void RenderManagerCore::run()
             
             // Render combined audio track using the AudioRenderer that was properly initialized
             if (logFunction) {
-                if (binauralSource != nullptr && filePlayer != nullptr)
-                    logFunction("Rendering combined audio (binaural + file player)...");
-                else if (filePlayer != nullptr)
-                    logFunction("Rendering audio from file player only...");
-                else if (binauralSource != nullptr)
-                    logFunction("Rendering binaural audio only...");
+                logFunction("Rendering combined audio from all configured tracks...");
             }
             
             // Use the proper AudioRenderer instance with both audio sources
@@ -421,8 +427,9 @@ void RenderManagerCore::run()
             // Log detailed information about the audio rendering process
             if (logFunction) {
                 logFunction("DETAILED AUDIO RENDERING INFO:");
-                logFunction("  - Binaural source available: " + juce::String(binauralSource != nullptr ? "YES" : "NO"));
-                logFunction("  - File player available: " + juce::String(filePlayer != nullptr ? "YES" : "NO"));
+                logFunction("  - Binaural track count: " + juce::String((int)binauralSources.size()));
+                logFunction("  - File track count: " + juce::String((int)filePlayers.size()));
+                logFunction("  - Noise track count: " + juce::String((int)noiseSources.size()));
                 logFunction("  - Audio file path: " + audioFile.getFullPathName());
                 logFunction("  - Audio file exists: " + juce::String(audioFile.existsAsFile() ? "YES" : "NO"));
                 if (audioFile.existsAsFile()) {

@@ -15,6 +15,7 @@ public:
     const std::vector<FilePlayerAudioSource::PlaylistItem>& getPlaylistItems() const { return playlistItems; }
     void setPlaylistItems(const std::vector<FilePlayerAudioSource::PlaylistItem>& items);
     void loadAudioFile(const juce::File& file);
+    void clearPlaylist();
 
 private:
     class PlaylistTableModel : public juce::TableListBoxModel

@@ -4,8 +4,10 @@
 #include "../audio/FilePlayerAudioSource.h"
 #include "../audio/NoiseAudioSource.h"
 
-RenderManager::RenderManager(BinauralAudioSource* binauralSource, FilePlayerAudioSource* filePlayer, NoiseAudioSource* noiseSource)
-    : core(std::make_unique<RenderManagerCore>(binauralSource, filePlayer, noiseSource))
+RenderManager::RenderManager(const std::vector<BinauralAudioSource*>& binauralSources,
+                             const std::vector<FilePlayerAudioSource*>& filePlayers,
+                             const std::vector<NoiseAudioSource*>& noiseSources)
+    : core(std::make_unique<RenderManagerCore>(binauralSources, filePlayers, noiseSources))
 {
 }
 

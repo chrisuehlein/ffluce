@@ -180,29 +180,34 @@ private:
         monitoringActive = true;
         monitorThread = std::make_unique<std::thread>([this]()
         {
+            int sleepCounter = 0;
             while (monitoringActive)
             {
-                std::this_thread::sleep_for(std::chrono::minutes(5));
-                
-                if (monitoringActive)
+                // Sleep in short intervals so we can respond to shutdown quickly
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!monitoringActive) break;
+
+                sleepCounter++;
+                // 5 minutes = 300 seconds = 3000 * 100ms intervals
+                if (sleepCounter >= 3000)
                 {
+                    sleepCounter = 0;
                     logEvent("HEARTBEAT", "System monitor alive");
                     logMemoryUsage("5-minute check");
-                    
+
                     // Check elapsed time
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - startTime);
-                    
+
                     if (elapsed.count() > 12000) // Close to 3h 25m
                     {
                         logEvent("WARNING", "Approaching critical time - increasing monitoring frequency");
-                        // Could trigger more frequent checks here
                     }
                 }
             }
         });
     }
-    
+
     void stopMonitoring()
     {
         monitoringActive = false;
